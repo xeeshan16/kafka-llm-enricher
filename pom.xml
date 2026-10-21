@@ -44,7 +44,7 @@
     <json-schema-validator.version>1.5.6</json-schema-validator.version>
     <errorprone.version>2.36.0</errorprone.version>
     <spotless.version>2.44.4</spotless.version>
-    <google-java-format.version>1.25.2</google-java-format.version>
+    <google-java-format.version>1.35.0</google-java-format.version>
     <jacoco.version>0.8.13</jacoco.version>
   </properties>
 

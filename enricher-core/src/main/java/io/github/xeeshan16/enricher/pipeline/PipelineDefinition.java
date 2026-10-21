@@ -11,8 +11,8 @@ import java.util.Objects;
  * @param inputTopic topic to consume
  * @param outputTopic topic that receives enriched envelopes
  * @param deadLetterTopic topic that receives records that could not be enriched
- * @param promptVersion version label of the prompt and schema; part of the result identity, so
- *     bump it whenever the prompt or schema changes meaning
+ * @param promptVersion version label of the prompt and schema; part of the result identity, so bump
+ *     it whenever the prompt or schema changes meaning
  * @param model model name passed to the provider
  * @param systemPrompt system instructions (may be empty)
  * @param userTemplate the user prompt template

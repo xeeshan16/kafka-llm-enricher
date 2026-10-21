@@ -12,8 +12,8 @@ import java.util.regex.Pattern;
 /**
  * Deterministic hashed bag-of-words embeddings.
  *
- * <p>Each lowercase word is hashed into one signed bucket and the vector is L2-normalised, so
- * texts sharing words have positive cosine similarity. Good enough for tests of similarity-based
+ * <p>Each lowercase word is hashed into one signed bucket and the vector is L2-normalised, so texts
+ * sharing words have positive cosine similarity. Good enough for tests of similarity-based
  * features; not a semantic model.
  */
 public final class FakeEmbeddingProvider implements EmbeddingProvider {
@@ -52,7 +52,7 @@ public final class FakeEmbeddingProvider implements EmbeddingProvider {
 
   private float[] vector(String text) {
     float[] v = new float[dimensions];
-    for (String word : NON_WORD.split(text.toLowerCase(Locale.ROOT))) {
+    for (String word : NON_WORD.splitAsStream(text.toLowerCase(Locale.ROOT)).toList()) {
       if (word.isEmpty()) {
         continue;
       }

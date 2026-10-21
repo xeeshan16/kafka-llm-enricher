@@ -24,9 +24,9 @@ import org.springframework.util.backoff.BackOff;
 /**
  * Runs one Spring Kafka listener container per pipeline and owns their lifecycle.
  *
- * <p>Each container commits offsets per record after the listener returns (or after the record
- * was dead-lettered). Failures are classified: unusable answers go to the dead-letter topic at
- * once; provider and publish errors are retried with the configured back-off first.
+ * <p>Each container commits offsets per record after the listener returns (or after the record was
+ * dead-lettered). Failures are classified: unusable answers go to the dead-letter topic at once;
+ * provider and publish errors are retried with the configured back-off first.
  */
 public final class PipelineRunner implements SmartLifecycle {
 
@@ -85,7 +85,8 @@ public final class PipelineRunner implements SmartLifecycle {
     running = true;
   }
 
-  private ConcurrentMessageListenerContainer<String, String> container(PipelineDefinition pipeline) {
+  private ConcurrentMessageListenerContainer<String, String> container(
+      PipelineDefinition pipeline) {
     ContainerProperties properties = new ContainerProperties(pipeline.inputTopic());
     properties.setGroupId(registry.groupId(pipeline.name()));
     properties.setAckMode(ContainerProperties.AckMode.RECORD);

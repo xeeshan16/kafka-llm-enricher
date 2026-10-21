@@ -15,8 +15,8 @@ import java.util.function.Function;
  *
  * <p>The same request always yields the same text, so pipelines built on it are reproducible. By
  * default it answers with {@link SchemaAwareResponder}; tests can pass their own responder to
- * script failures such as malformed JSON. Token usage is estimated with {@link TokenEstimator}.
- * It also counts calls, which lets tests assert how many paid calls a real provider would have
+ * script failures such as malformed JSON. Token usage is estimated with {@link TokenEstimator}. It
+ * also counts calls, which lets tests assert how many paid calls a real provider would have
  * received.
  */
 public final class FakeLlmProvider implements LlmProvider {

@@ -8,6 +8,7 @@ import io.github.xeeshan16.enricher.llm.fake.FakeLlmProvider;
 import io.github.xeeshan16.enricher.pipeline.PipelineDefinition;
 import java.time.Duration;
 import java.util.LinkedHashSet;
+import java.util.List;
 import java.util.Set;
 import org.apache.kafka.clients.admin.NewTopic;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
@@ -27,8 +28,8 @@ import org.springframework.util.backoff.FixedBackOff;
 /**
  * Wires enrichment pipelines into a Spring Boot application.
  *
- * <p>Every bean backs off when the application defines its own, so teams can swap the provider,
- * the sink or the retry back-off without forking. Kafka clients come from Spring Boot's {@code
+ * <p>Every bean backs off when the application defines its own, so teams can swap the provider, the
+ * sink or the retry back-off without forking. Kafka clients come from Spring Boot's {@code
  * spring.kafka.*} configuration; keys and values are read and written as strings.
  */
 @AutoConfiguration(after = KafkaAutoConfiguration.class)
@@ -105,20 +106,26 @@ public class EnricherAutoConfiguration {
   @ConditionalOnProperty(prefix = "enricher.topics", name = "create", havingValue = "true")
   public KafkaAdmin.NewTopics enricherTopics(
       EnricherProperties properties, PipelineRegistry registry) {
+    return new KafkaAdmin.NewTopics(
+        topicsToCreate(registry, properties.topics()).toArray(NewTopic[]::new));
+  }
+
+  /** Input, output and dead-letter topics of every pipeline, each once, in declaration order. */
+  static List<NewTopic> topicsToCreate(
+      PipelineRegistry registry, EnricherProperties.Topics topics) {
     Set<String> names = new LinkedHashSet<>();
     for (PipelineDefinition pipeline : registry.pipelines()) {
       names.add(pipeline.inputTopic());
       names.add(pipeline.outputTopic());
       names.add(pipeline.deadLetterTopic());
     }
-    return new KafkaAdmin.NewTopics(
-        names.stream()
-            .map(
-                name ->
-                    TopicBuilder.name(name)
-                        .partitions(properties.topics().partitions())
-                        .replicas(properties.topics().replicationFactor())
-                        .build())
-            .toArray(NewTopic[]::new));
+    return names.stream()
+        .map(
+            name ->
+                TopicBuilder.name(name)
+                    .partitions(topics.partitions())
+                    .replicas(topics.replicationFactor())
+                    .build())
+        .toList();
   }
 }

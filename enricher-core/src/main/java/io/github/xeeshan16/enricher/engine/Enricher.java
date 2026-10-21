@@ -19,8 +19,8 @@ import java.util.Objects;
  *
  * <p>This class does no I/O besides the provider call and holds no per-record state, so one
  * instance serves every pipeline and thread. Provider failures propagate as {@link
- * io.github.xeeshan16.enricher.llm.LlmProviderException} so the caller can apply its retry
- * policy; answers that are unusable come back as {@link EnrichmentOutcome.Failed}.
+ * io.github.xeeshan16.enricher.llm.LlmProviderException} so the caller can apply its retry policy;
+ * answers that are unusable come back as {@link EnrichmentOutcome.Failed}.
  *
  * <p>The envelope contains no wall-clock time, so the same input, prompt version and answer always
  * produce byte-identical output. That keeps replays and duplicates easy to compare downstream.
@@ -88,7 +88,8 @@ public final class Enricher {
     }
     List<String> errors = pipeline.outputSchema().validate(enrichment);
     if (!errors.isEmpty()) {
-      String detail = String.join("; ", errors.subList(0, Math.min(errors.size(), MAX_DETAIL_ERRORS)));
+      String detail =
+          String.join("; ", errors.subList(0, Math.min(errors.size(), MAX_DETAIL_ERRORS)));
       return new EnrichmentOutcome.Failed(
           inputHash, FailureReason.SCHEMA_VIOLATION, detail, response);
     }

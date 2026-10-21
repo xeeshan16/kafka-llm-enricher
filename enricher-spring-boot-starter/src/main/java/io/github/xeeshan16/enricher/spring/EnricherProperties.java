@@ -25,14 +25,12 @@ public record EnricherProperties(
   public EnricherProperties {
     topics = topics == null ? new Topics(false, 3, (short) 1) : topics;
     pipelines =
-        pipelines == null
-            ? Map.of()
-            : Collections.unmodifiableMap(new LinkedHashMap<>(pipelines));
+        pipelines == null ? Map.of() : Collections.unmodifiableMap(new LinkedHashMap<>(pipelines));
   }
 
   /**
-   * Topic creation through Spring Kafka's {@code KafkaAdmin}. Off by default: production topics
-   * are usually managed elsewhere.
+   * Topic creation through Spring Kafka's {@code KafkaAdmin}. Off by default: production topics are
+   * usually managed elsewhere.
    *
    * @param create create missing input, output and dead-letter topics at startup
    * @param partitions partitions for created topics

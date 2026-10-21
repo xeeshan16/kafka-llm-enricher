@@ -66,7 +66,8 @@ class EnrichingListenerTest {
   @Test
   void unusableAnswerThrowsNonRetryableFailure() {
     EnrichingListener listener =
-        new EnrichingListener(PIPELINE, new Enricher(new FakeLlmProvider(req -> "{\"x\":1}")), sink);
+        new EnrichingListener(
+            PIPELINE, new Enricher(new FakeLlmProvider(req -> "{\"x\":1}")), sink);
 
     assertThatThrownBy(() -> listener.onMessage(record("{}")))
         .isInstanceOfSatisfying(

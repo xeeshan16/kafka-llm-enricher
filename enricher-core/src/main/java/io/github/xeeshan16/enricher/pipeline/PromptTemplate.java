@@ -23,9 +23,9 @@ import java.util.regex.Pattern;
  * </ul>
  *
  * <p>Event content is untrusted. Every substituted value is JSON-encoded and {@code <} is written
- * as {@code <}, so event text cannot close the {@code <event>} block or pose as new
- * instructions outside a JSON string. Unknown placeholders are rejected when the template is
- * compiled, so typos fail at startup rather than per record.
+ * as {@code <}, so event text cannot close the {@code <event>} block or pose as new instructions
+ * outside a JSON string. Unknown placeholders are rejected when the template is compiled, so typos
+ * fail at startup rather than per record.
  */
 public final class PromptTemplate {
 
@@ -55,7 +55,9 @@ public final class PromptTemplate {
     }
     if (!unknown.isEmpty()) {
       throw new IllegalArgumentException(
-          "unknown placeholders " + unknown + "; use {{event}}, {{event.<path>}}, {{key}}, {{topic}}");
+          "unknown placeholders "
+              + unknown
+              + "; use {{event}}, {{event.<path>}}, {{key}}, {{topic}}");
     }
     return new PromptTemplate(source);
   }

@@ -12,7 +12,8 @@ class CanonicalJsonTest {
   @Test
   void sortsKeysRecursivelyAndDropsWhitespace() throws Exception {
     String canonical =
-        CanonicalJson.write(MAPPER.readTree("{ \"b\": [ {\"z\":1, \"a\":2} ], \"a\": {\"y\":true, \"x\":null} }"));
+        CanonicalJson.write(
+            MAPPER.readTree("{ \"b\": [ {\"z\":1, \"a\":2} ], \"a\": {\"y\":true, \"x\":null} }"));
 
     assertThat(canonical).isEqualTo("{\"a\":{\"x\":null,\"y\":true},\"b\":[{\"a\":2,\"z\":1}]}");
   }

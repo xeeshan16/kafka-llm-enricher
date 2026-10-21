@@ -24,7 +24,8 @@ public final class EnrichingListener implements MessageListener<String, String> 
   private final Enricher enricher;
   private final EnrichedRecordSink sink;
 
-  public EnrichingListener(PipelineDefinition pipeline, Enricher enricher, EnrichedRecordSink sink) {
+  public EnrichingListener(
+      PipelineDefinition pipeline, Enricher enricher, EnrichedRecordSink sink) {
     this.pipeline = pipeline;
     this.enricher = enricher;
     this.sink = sink;

@@ -135,7 +135,8 @@ class EnricherTest {
     Enricher enricher = new Enricher(new FakeLlmProvider());
 
     EnrichmentOutcome outcome =
-        enricher.enrich(pipeline, record("Customer says the parcel never arrived, product missing."));
+        enricher.enrich(
+            pipeline, record("Customer says the parcel never arrived, product missing."));
 
     JsonNode envelope = ((EnrichmentOutcome.Enriched) outcome).envelope();
     assertThat(envelope.path("input").isTextual()).isTrue();

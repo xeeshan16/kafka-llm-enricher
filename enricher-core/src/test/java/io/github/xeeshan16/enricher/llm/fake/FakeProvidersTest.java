@@ -17,7 +17,8 @@ class FakeProvidersTest {
   private static final ObjectMapper MAPPER = new ObjectMapper();
 
   private static LlmRequest request(String event, JsonNode schema) {
-    return new LlmRequest("fake-1", "sys", "Classify:\n<event>\n" + event + "\n</event>", schema, 64);
+    return new LlmRequest(
+        "fake-1", "sys", "Classify:\n<event>\n" + event + "\n</event>", schema, 64);
   }
 
   @Test
@@ -47,7 +48,8 @@ class FakeProvidersTest {
     JsonNode schema = TestPipelines.disputeSchema().node();
     SchemaAwareResponder responder = new SchemaAwareResponder();
 
-    JsonNode fraud = MAPPER.readTree(responder.apply(request("{\"n\":\"Fraudulent use\"}", schema)));
+    JsonNode fraud =
+        MAPPER.readTree(responder.apply(request("{\"n\":\"Fraudulent use\"}", schema)));
     JsonNode other = MAPPER.readTree(responder.apply(request("{\"n\":\"Hello there\"}", schema)));
 
     assertThat(fraud.path("category").asText()).isEqualTo("fraud");

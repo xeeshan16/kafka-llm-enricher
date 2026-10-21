@@ -46,7 +46,8 @@ public final class PipelineRegistry {
         throw new IllegalStateException(
             "invalid pipeline 'enricher.pipelines." + name + "': " + e.getMessage(), e);
       }
-      groupIds.put(name, p.groupId() == null || p.groupId().isBlank() ? "enricher-" + name : p.groupId());
+      groupIds.put(
+          name, p.groupId() == null || p.groupId().isBlank() ? "enricher-" + name : p.groupId());
       if (p.concurrency() < 1) {
         throw new IllegalStateException(
             "invalid pipeline 'enricher.pipelines." + name + "': concurrency must be at least 1");

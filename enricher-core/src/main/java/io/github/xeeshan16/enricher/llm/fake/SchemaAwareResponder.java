@@ -22,8 +22,8 @@ import java.util.regex.Pattern;
  * <p>It is a stand-in for a model, not a model: enum fields take the value whose words occur most
  * often in the event (falling back to {@code other} when the enum has it), booleans are true when
  * the last word of the property name occurs, numbers take the first number in range and strings
- * take the first sentence of the event's longest text field. That is enough for realistic demos
- * and for measuring pipeline mechanics without network access or keys.
+ * take the first sentence of the event's longest text field. That is enough for realistic demos and
+ * for measuring pipeline mechanics without network access or keys.
  *
  * <p>The event is read from between the {@code <event>} and {@code </event>} markers that the
  * prompt renderer writes; without markers the whole user prompt is used.
@@ -169,7 +169,7 @@ public final class SchemaAwareResponder implements Function<LlmRequest, String> 
   static List<String> words(String identifier) {
     String spaced = CAMEL.matcher(identifier).replaceAll("$1 $2").toLowerCase(Locale.ROOT);
     List<String> words = new ArrayList<>();
-    for (String w : WORD_SPLIT.split(spaced)) {
+    for (String w : WORD_SPLIT.splitAsStream(spaced).toList()) {
       if (!w.isEmpty()) {
         words.add(w);
       }

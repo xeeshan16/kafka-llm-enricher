@@ -16,8 +16,8 @@ import java.util.Map;
 /**
  * Canonical JSON: object keys sorted at every level, no insignificant whitespace.
  *
- * <p>Two events that differ only in key order or formatting get the same canonical form and so
- * the same {@link #sha256 hash}, which is what lets the result ledger recognise a re-delivered or
+ * <p>Two events that differ only in key order or formatting get the same canonical form and so the
+ * same {@link #sha256 hash}, which is what lets the result ledger recognise a re-delivered or
  * re-published event. Numbers keep Jackson's textual form, so {@code 1} and {@code 1.0} stay
  * different.
  */

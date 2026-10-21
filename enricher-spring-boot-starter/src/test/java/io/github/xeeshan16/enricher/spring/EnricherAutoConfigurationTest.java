@@ -54,10 +54,13 @@ class EnricherAutoConfigurationTest {
             "spring.kafka.admin.auto-create=false")
         .run(
             context -> {
-              KafkaAdmin.NewTopics topics = context.getBean(KafkaAdmin.NewTopics.class);
-              assertThat(topics.getNewTopics())
-                  .extracting(t -> t.name() + "/" + t.numPartitions())
-                  .containsExactly("in/6", "out/6", "in.enricher-dlq/6");
+              assertThat(context).hasSingleBean(KafkaAdmin.NewTopics.class);
+              assertThat(
+                      EnricherAutoConfiguration.topicsToCreate(
+                          context.getBean(PipelineRegistry.class),
+                          context.getBean(EnricherProperties.class).topics()))
+                  .extracting(t -> t.name() + "/" + t.numPartitions() + "/" + t.replicationFactor())
+                  .containsExactly("in/6/1", "out/6/1", "in.enricher-dlq/6/1");
             });
   }
 

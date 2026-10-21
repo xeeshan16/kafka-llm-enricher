@@ -60,7 +60,8 @@ class DisputeTriagePipelineIT {
     LlmProvider llmProvider() {
       SchemaAwareResponder responder = new SchemaAwareResponder();
       return new FakeLlmProvider(
-          req -> req.userPrompt().contains("POISON") ? "Sorry, I cannot help." : responder.apply(req));
+          req ->
+              req.userPrompt().contains("POISON") ? "Sorry, I cannot help." : responder.apply(req));
     }
   }
 
@@ -69,8 +70,9 @@ class DisputeTriagePipelineIT {
     Map<String, String> events =
         Map.of(
             "card-1001",
-            "{\"disputeId\":\"D-1001\",\"merchant\":\"Acme Streaming\",\"amount\":12.99,"
-                + "\"note\":\"I was charged twice this month, please refund the duplicate charge.\"}",
+            "{\"disputeId\":\"D-1001\",\"merchant\":\"Acme"
+                + " Streaming\",\"amount\":12.99,\"note\":\"I was charged twice this month, please"
+                + " refund the duplicate charge.\"}",
             "card-1002",
             "{\"disputeId\":\"D-1002\",\"merchant\":\"Northwind Electronics\",\"amount\":349.00,"
                 + "\"note\":\"I did not make this purchase, my card was used fraudulently.\"}",
@@ -108,6 +110,14 @@ class DisputeTriagePipelineIT {
       assertThat(header(r, EnricherHeaders.INPUT_HASH))
           .isEqualTo(envelope.path("inputHash").asText());
       assertThat(header(r, EnricherHeaders.PIPELINE)).isEqualTo("dispute-triage");
+    }
+    for (ConsumerRecord<String, String> r : enriched) {
+      // Printed so the README sample output can be taken from a real run.
+      System.out.println(
+          "SAMPLE_ENVELOPE "
+              + MAPPER
+                  .writerWithDefaultPrettyPrinter()
+                  .writeValueAsString(MAPPER.readTree(r.value())));
     }
     assertThat(categoryOf(enriched, "card-1001")).isEqualTo("duplicate_charge");
     assertThat(categoryOf(enriched, "card-1002")).isEqualTo("fraud");
