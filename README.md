@@ -41,23 +41,41 @@ An input record such as
 {"disputeId":"D-1001","merchant":"Acme Streaming","amount":12.99,"note":"I was charged twice this month, please refund the duplicate charge."}
 ```
 
-becomes an envelope on the output topic (shape produced by the integration test with the built-in fake provider):
+becomes this envelope on the output topic. This is real output from the integration test in CI (run [39605714943](https://github.com/xeeshan16/kafka-llm-enricher/actions/runs/39605714943)), produced by the built-in deterministic fake provider, not an LLM:
 
 ```json
 {
-  "format": "kafka-llm-enricher/v1",
-  "pipeline": "dispute-triage",
-  "promptVersion": "v1",
-  "model": "fake-1",
-  "inputHash": "sha256:…",
-  "source": {"topic": "payments.disputes", "partition": 1, "offset": 0, "key": "card-1001"},
-  "input": {"disputeId": "D-1001", "merchant": "Acme Streaming", "amount": 12.99, "note": "…"},
-  "enrichment": {"category": "duplicate_charge", "urgency": "…", "summary": "…", "customer_requests_refund": true},
-  "usage": {"inputTokens": 0, "outputTokens": 0}
+  "format" : "kafka-llm-enricher/v1",
+  "pipeline" : "dispute-triage",
+  "promptVersion" : "v1",
+  "model" : "fake-1",
+  "inputHash" : "sha256:cd68da869253f4902a04c5dc324f89b0208db371115b3e85088175364fe182e2",
+  "source" : {
+    "topic" : "payments.disputes",
+    "partition" : 0,
+    "offset" : 0,
+    "key" : "card-1001"
+  },
+  "input" : {
+    "disputeId" : "D-1001",
+    "merchant" : "Acme Streaming",
+    "amount" : 12.99,
+    "note" : "I was charged twice this month, please refund the duplicate charge."
+  },
+  "enrichment" : {
+    "category" : "duplicate_charge",
+    "urgency" : "medium",
+    "summary" : "I was charged twice this month, please refund the duplicate charge.",
+    "customer_requests_refund" : true
+  },
+  "usage" : {
+    "inputTokens" : 121,
+    "outputTokens" : 41
+  }
 }
 ```
 
-Records whose answer is not valid JSON or does not satisfy the schema go to the dead-letter topic unchanged, with `enricher-failure-reason` (`INVALID_JSON`, `SCHEMA_VIOLATION`, `PROVIDER_ERROR`, `PROCESSING_ERROR`) and `enricher-failure-detail` headers.
+Token counts from the fake are estimates (four characters per token). Records whose answer is not valid JSON or does not satisfy the schema go to the dead-letter topic unchanged, with `enricher-failure-reason` (`INVALID_JSON`, `SCHEMA_VIOLATION`, `PROVIDER_ERROR`, `PROCESSING_ERROR`) and `enricher-failure-detail` headers.
 
 ## Quick start
 
@@ -68,6 +86,22 @@ git clone https://github.com/xeeshan16/kafka-llm-enricher.git
 cd kafka-llm-enricher
 ./mvnw verify          # unit tests + Kafka integration test (Testcontainers), no API keys needed
 ```
+
+The integration test starts a Kafka broker in Docker, runs the `dispute-triage` pipeline from `enricher-app/src/main/resources/application.yml`, and checks both the enriched envelopes and the dead-letter path.
+
+### Use it in your own Spring Boot service
+
+Until the first tagged release (JitPack coordinates arrive with `v0.1.0`), install locally with `./mvnw install -DskipTests` and depend on:
+
+```xml
+<dependency>
+  <groupId>io.github.xeeshan16</groupId>
+  <artifactId>enricher-spring-boot-starter</artifactId>
+  <version>0.1.0-SNAPSHOT</version>
+</dependency>
+```
+
+Then add an `enricher.pipelines.<name>` block to your configuration. Your existing `spring.kafka.*` settings are reused. To plug in your own model client, define a bean implementing `io.github.xeeshan16.enricher.llm.LlmProvider`.
 
 A `docker compose up` demo with a synthetic dispute stream, a Docker image and a Helm chart arrive on day 6.
 
