@@ -1,0 +1,81 @@
+name: ci
+
+on:
+  push:
+    branches: [dev, main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  format:
+    name: format (google-java-format via Spotless)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: maven
+      - name: Apply formatter and fail on any difference
+        run: |
+          ./mvnw -B -ntp spotless:apply
+          if ! git diff --quiet; then
+            echo "::error::Code is not formatted. Run ./mvnw spotless:apply. Diff follows."
+            git diff | tee spotless.patch
+            exit 1
+          fi
+      - name: Upload formatting patch
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: spotless-patch
+          path: spotless.patch
+          if-no-files-found: ignore
+
+  build:
+    name: build, static analysis, tests, coverage
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: maven
+      - name: Pin Docker API version for Testcontainers
+        run: |
+          docker version
+          echo "api.version=1.44" > ~/.docker-java.properties
+      - name: Compile (Error Prone), unit and integration tests (Testcontainers), coverage
+        run: ./mvnw -B -ntp -Dspotless.check.skip=true verify
+      - name: Coverage summary
+        if: always()
+        run: |
+          {
+            echo "### Line coverage (JaCoCo)"
+            echo "| module | covered | missed | % |"
+            echo "|---|---|---|---|"
+            for csv in */target/site/jacoco/jacoco.csv; do
+              [ -f "$csv" ] || continue
+              awk -F, -v m="${csv%%/*}" 'NR>1 {c+=$9; x+=$8} END {if (c+x>0) printf "| %s | %d | %d | %.1f |\n", m, c, x, 100*c/(c+x)}' "$csv"
+            done
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload test and coverage reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: reports
+          path: |
+            */target/surefire-reports/
+            */target/failsafe-reports/
+            */target/site/jacoco/
+          if-no-files-found: ignore

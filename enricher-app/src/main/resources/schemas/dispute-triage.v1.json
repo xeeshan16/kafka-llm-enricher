@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/xeeshan16/kafka-llm-enricher/schemas/dispute-triage.v1.json",
+  "title": "Card dispute triage",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["category", "urgency", "summary", "customer_requests_refund"],
+  "properties": {
+    "category": {
+      "description": "Dispute reason, aligned with common card-network reason groups.",
+      "enum": [
+        "fraud",
+        "product_not_received",
+        "duplicate_charge",
+        "subscription_cancelled",
+        "credit_not_processed",
+        "other"
+      ]
+    },
+    "urgency": {
+      "description": "How quickly an analyst should look at it.",
+      "enum": ["low", "medium", "high"]
+    },
+    "summary": {
+      "description": "One sentence for the analyst queue. No card numbers or personal data.",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200
+    },
+    "customer_requests_refund": {
+      "description": "Whether the customer explicitly asks for money back.",
+      "type": "boolean"
+    }
+  }
+}

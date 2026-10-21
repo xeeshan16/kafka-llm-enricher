@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["category", "urgency", "summary", "customer_requests_refund"],
+  "properties": {
+    "category": {
+      "enum": ["fraud", "product_not_received", "duplicate_charge", "subscription_cancelled", "credit_not_processed", "other"]
+    },
+    "urgency": { "enum": ["low", "medium", "high"] },
+    "summary": { "type": "string", "minLength": 1, "maxLength": 200 },
+    "customer_requests_refund": { "type": "boolean" },
+    "amount": { "type": ["number", "null"], "minimum": 0 }
+  }
+}
