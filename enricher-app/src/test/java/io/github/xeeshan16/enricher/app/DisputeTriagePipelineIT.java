@@ -46,7 +46,7 @@ class DisputeTriagePipelineIT {
   private static final String DLQ = "payments.disputes.enricher-dlq";
   private static final ObjectMapper MAPPER = new ObjectMapper();
 
-  @Container static final KafkaContainer KAFKA = new KafkaContainer("apache/kafka:3.9.0");
+  @Container static final KafkaContainer KAFKA = new KafkaContainer("apache/kafka:3.8.0");
 
   @DynamicPropertySource
   static void kafka(DynamicPropertyRegistry registry) {
