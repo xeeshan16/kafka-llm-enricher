@@ -31,3 +31,34 @@
 - The second commit of the day also added the docs and repository templates, although its message only describes the code fixes.
 
 **Next (day 2):** Kafka read-process-write transactions, PostgreSQL result ledger with Flyway and in-flight leases, chaos test for duplicate paid calls, ADR on ledger vs Kafka-only idempotency.
+
+## Day 2 (2026-10-22): exactly-once delivery and the result ledger
+
+**Built**
+
+- `enricher-core`
+  - `Enricher` split into `prepare` (parse, canonical hash, render), the provider call, and `interpret`; `fromStored` rebuilds a byte-identical envelope from a stored answer. Enrichments are written in canonical key order.
+  - `ResultLedger` contract (`claim` returning hit / lease / busy, idempotent first-wins `complete`, token-checked `release`, `purgeCompletedBefore`), `InMemoryResultLedger`, `NoopResultLedger`.
+  - `LedgeredEnricher`: ledger hit without a call; lease, call, store; short in-place wait on a busy key, then `LedgerBusyException`; a late completion publishes the winning answer.
+- `enricher-ledger-postgres` (new module): `PostgresResultLedger` with one auto-committed statement per operation (`INSERT .. ON CONFLICT .. WHERE` for claims and completions), lease expiry on the database clock, and `LedgerSchema` running the module's own Flyway migrations with a separate history table baselined at 0.
+- `enricher-spring-boot-starter`
+  - Kafka transactions whenever Boot has a Kafka transaction manager; `DefaultAfterRollbackProcessor` with transactional dead-lettering. `enricher.delivery` = `auto` / `exactly-once` / `at-least-once`, each failing fast on a contradicting setup.
+  - `enricher.ledger.*` (store, lease TTL, busy wait, poll and retry intervals, schema init, owner). Busy keys retry on a back-off sized to one lease; exhausted ones are dead-lettered as `LEDGER_BUSY`.
+  - `enricher-result-source` header.
+- `enricher-app`: PostgreSQL datasource, transactions on by default with a random per-process `transaction-id-prefix`, `read_committed` consumers.
+- Tests: in-memory ledger and `LedgeredEnricher` unit tests (including concurrent claims), `PostgresResultLedgerIT` (24 concurrent workers on separate connections, lapsed-lease takeover, first-wins completion, purge, migration next to an existing application table), new starter tests for delivery and ledger selection, `DisputeTriagePipelineIT` on Kafka + PostgreSQL with a replayed event answered from the ledger, and `ExactlyOnceChaosIT`.
+- ADR 0002: ledger versus Kafka-only idempotency.
+
+**Verified**
+
+- In CI on `dev`: runs [39785366118](https://github.com/xeeshan16/kafka-llm-enricher/actions/runs/39785366118) and [39785919072](https://github.com/xeeshan16/kafka-llm-enricher/actions/runs/39785919072) green (Error Prone, formatting, unit, Testcontainers integration and chaos tests).
+- Chaos test (run 39785919072): 40 inputs, 8 aborted-after-store transactions, one worker hung 14 s past a 6 s `max.poll.interval.ms`. Result: 40 envelopes for a `read_committed` reader (49 in the log including aborted attempts), 40 provider calls (one per input), ledger 40 completed rows and 9 hits.
+- Locally: the core module compiled and its 43 unit tests ran against distro jars with a stub JSON Schema validator; the ledger SQL and `PostgresResultLedger` were exercised against a local PostgreSQL 16 (24 concurrent claims: 1 lease, 23 busy). The starter, Flyway migration and Kafka tests ran in CI only.
+
+**Notes and plan adjustments**
+
+- The first chaos run failed because `SpringApplicationBuilder.properties()` sets default properties, which lose to `application.yml` placeholders; the test now passes its settings as command-line arguments.
+- CI artifacts cannot be downloaded from the build workspace, so the offline Maven cache idea is dropped. The chaos counters and sample envelopes are printed to the job log instead.
+- Each record is its own Kafka transaction for now. Day 3's per-key parallelism will revisit transaction batching.
+
+**Next (day 3):** per-key ordered parallelism within a partition, pause/resume so the poll loop never blocks on slow calls, timeouts and full-jitter retries, retry topics and poison-message tests.
