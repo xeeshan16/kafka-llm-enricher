@@ -230,21 +230,22 @@ class ExactlyOnceChaosIT {
     ConfigurableApplicationContext context =
         new SpringApplicationBuilder(ChaosInstance.class)
             .web(WebApplicationType.NONE)
-            .properties(
-                "spring.kafka.bootstrap-servers=" + KAFKA.getBootstrapServers(),
-                "spring.datasource.url=" + POSTGRES.getJdbcUrl(),
-                "spring.datasource.username=" + POSTGRES.getUsername(),
-                "spring.datasource.password=" + POSTGRES.getPassword(),
-                "spring.kafka.producer.transaction-id-prefix=chaos-" + name + "-",
-                "spring.kafka.consumer.properties.max.poll.interval.ms=6000",
-                "spring.kafka.consumer.max-poll-records=5",
-                "enricher.delivery=exactly-once",
-                "enricher.ledger.store=postgres",
-                "enricher.ledger.owner=instance-" + name,
-                "enricher.ledger.lease-ttl=60s",
-                "enricher.ledger.busy-wait=1s",
-                "enricher.topics.partitions=4")
-            .run();
+            // Command-line arguments, so they win over application.yml; default properties would
+            // not.
+            .run(
+                "--spring.kafka.bootstrap-servers=" + KAFKA.getBootstrapServers(),
+                "--spring.datasource.url=" + POSTGRES.getJdbcUrl(),
+                "--spring.datasource.username=" + POSTGRES.getUsername(),
+                "--spring.datasource.password=" + POSTGRES.getPassword(),
+                "--spring.kafka.producer.transaction-id-prefix=chaos-" + name + "-",
+                "--spring.kafka.consumer.properties.max.poll.interval.ms=6000",
+                "--spring.kafka.consumer.max-poll-records=5",
+                "--enricher.delivery=exactly-once",
+                "--enricher.ledger.store=postgres",
+                "--enricher.ledger.owner=instance-" + name,
+                "--enricher.ledger.lease-ttl=60s",
+                "--enricher.ledger.busy-wait=1s",
+                "--enricher.topics.partitions=4");
     instances.add(context);
     return context;
   }
