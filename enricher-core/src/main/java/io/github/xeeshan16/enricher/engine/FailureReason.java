@@ -8,6 +8,8 @@ public enum FailureReason {
   SCHEMA_VIOLATION,
   /** The provider failed with a non-retryable error, or retries were exhausted. */
   PROVIDER_ERROR,
+  /** Another worker held the record's ledger lease for longer than the retry budget. */
+  LEDGER_BUSY,
   /** Anything else, for example the output topic could not be written. */
   PROCESSING_ERROR
 }

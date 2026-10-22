@@ -4,7 +4,9 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.xeeshan16.enricher.TestPipelines;
+import io.github.xeeshan16.enricher.json.CanonicalJson;
 import io.github.xeeshan16.enricher.llm.LlmProviderException;
 import io.github.xeeshan16.enricher.llm.fake.FakeLlmProvider;
 import io.github.xeeshan16.enricher.pipeline.InputRecord;
@@ -142,6 +144,41 @@ class EnricherTest {
     assertThat(envelope.path("input").isTextual()).isTrue();
     assertThat(envelope.path("enrichment").path("category").asText())
         .isEqualTo("product_not_received");
+  }
+
+  @Test
+  void storedEnrichmentRebuildsAByteIdenticalEnvelope() throws Exception {
+    Enricher enricher = new Enricher(new FakeLlmProvider());
+    PreparedRecord prepared = enricher.prepare(pipeline, record(DUPLICATE));
+    EnrichmentOutcome.Enriched fresh =
+        (EnrichmentOutcome.Enriched)
+            enricher.interpret(prepared, enricher.provider().complete(prepared.request()));
+
+    String enrichment = CanonicalJson.write(fresh.envelope().get("enrichment"));
+    EnrichmentOutcome.Enriched stored =
+        enricher.fromStored(
+            prepared, enrichment, fresh.response().model(), fresh.response().usage());
+
+    ObjectMapper mapper = new ObjectMapper();
+    assertThat(mapper.writeValueAsString(stored.envelope()))
+        .isEqualTo(mapper.writeValueAsString(fresh.envelope()));
+  }
+
+  @Test
+  void enrichmentIsWrittenInCanonicalKeyOrder() {
+    Enricher enricher =
+        new Enricher(
+            new FakeLlmProvider(
+                req ->
+                    "{\"urgency\":\"low\",\"summary\":\"s\",\"category\":\"other\","
+                        + "\"customer_requests_refund\":false}"));
+
+    JsonNode envelope =
+        ((EnrichmentOutcome.Enriched) enricher.enrich(pipeline, record(DUPLICATE))).envelope();
+
+    assertThat(envelope.path("enrichment").fieldNames())
+        .toIterable()
+        .containsExactly("category", "customer_requests_refund", "summary", "urgency");
   }
 
   @Test
