@@ -158,12 +158,8 @@ class DisputeTriagePipelineIT {
       assertThat(header(r, EnricherHeaders.RESULT_SOURCE)).isEqualTo("provider");
     }
     for (ConsumerRecord<String, String> r : enriched) {
-      // Printed so the README sample output can be taken from a real run.
-      System.out.println(
-          "SAMPLE_ENVELOPE "
-              + MAPPER
-                  .writerWithDefaultPrettyPrinter()
-                  .writeValueAsString(MAPPER.readTree(r.value())));
+      // Printed (one line each) so the README sample output can be taken from a real run.
+      System.out.println("SAMPLE_ENVELOPE " + r.value());
     }
     assertThat(categoryOf(enriched, "card-1001")).isEqualTo("duplicate_charge");
     assertThat(categoryOf(enriched, "card-1002")).isEqualTo("fraud");
