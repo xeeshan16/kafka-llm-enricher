@@ -12,6 +12,12 @@ public final class EnricherHeaders {
   /** {@code sha256:<hex>} of the canonical input, on enriched records. */
   public static final String INPUT_HASH = "enricher-input-hash";
 
+  /**
+   * {@code provider} when this delivery paid for a model call, {@code ledger} when it reused a
+   * stored result. On enriched records.
+   */
+  public static final String RESULT_SOURCE = "enricher-result-source";
+
   /** {@link io.github.xeeshan16.enricher.engine.FailureReason} name, on dead-lettered records. */
   public static final String FAILURE_REASON = "enricher-failure-reason";
 

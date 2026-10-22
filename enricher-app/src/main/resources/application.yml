@@ -7,14 +7,35 @@ spring:
       auto-offset-reset: earliest
       enable-auto-commit: false
       max-poll-records: 50
+      # Read only committed records, so chained pipelines never enrich an aborted result.
+      isolation-level: read-committed
     producer:
       acks: all
+      # Enables Kafka transactions (exactly-once read-process-write). Must be unique per instance:
+      # the default adds a random suffix; on Kubernetes, ENRICHER_TX_ID_PREFIX=enricher-${POD_NAME}-
+      # gives stable, readable ids.
+      transaction-id-prefix: ${ENRICHER_TX_ID_PREFIX:enricher-${random.uuid}-}
       properties:
         enable.idempotence: true
+  datasource:
+    url: ${ENRICHER_DB_URL:jdbc:postgresql://localhost:5432/enricher}
+    username: ${ENRICHER_DB_USER:enricher}
+    password: ${ENRICHER_DB_PASSWORD:enricher}
+    hikari:
+      maximum-pool-size: ${ENRICHER_DB_POOL_SIZE:10}
+  # The result ledger runs its own migrations with its own history table.
+  flyway:
+    enabled: false
 
 enricher:
   auto-startup: ${ENRICHER_AUTO_STARTUP:true}
   provider: ${ENRICHER_PROVIDER:fake}
+  delivery: ${ENRICHER_DELIVERY:auto}
+  ledger:
+    store: ${ENRICHER_LEDGER_STORE:auto}
+    lease-ttl: ${ENRICHER_LEDGER_LEASE_TTL:2m}
+    busy-wait: 2s
+    initialize-schema: ${ENRICHER_LEDGER_INIT_SCHEMA:true}
   topics:
     create: ${ENRICHER_CREATE_TOPICS:true}
     partitions: 3

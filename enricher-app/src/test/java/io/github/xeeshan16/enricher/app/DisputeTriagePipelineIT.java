@@ -4,10 +4,12 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import io.github.xeeshan16.enricher.llm.LlmProvider;
+import io.github.xeeshan16.enricher.ledger.ResultLedger;
+import io.github.xeeshan16.enricher.ledger.postgres.PostgresResultLedger;
 import io.github.xeeshan16.enricher.llm.fake.FakeLlmProvider;
 import io.github.xeeshan16.enricher.llm.fake.SchemaAwareResponder;
 import io.github.xeeshan16.enricher.spring.EnricherHeaders;
+import io.github.xeeshan16.enricher.spring.PipelineRunner;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.Instant;
@@ -24,18 +26,21 @@ import org.apache.kafka.clients.producer.ProducerRecord;
 import org.apache.kafka.common.serialization.StringDeserializer;
 import org.apache.kafka.common.serialization.StringSerializer;
 import org.junit.jupiter.api.Test;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.context.TestConfiguration;
 import org.springframework.context.annotation.Bean;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
+import org.testcontainers.containers.PostgreSQLContainer;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
 import org.testcontainers.kafka.KafkaContainer;
 
 /**
- * End to end against a real broker: disputes in, validated envelopes out, unusable answers to the
- * dead-letter topic with a reason header.
+ * End to end against a real broker and PostgreSQL, with Kafka transactions on: disputes in,
+ * validated envelopes out, unusable answers to the dead-letter topic with a reason header, and a
+ * re-published event answered from the result ledger without a second provider call.
  */
 @SpringBootTest
 @Testcontainers
@@ -48,16 +53,26 @@ class DisputeTriagePipelineIT {
 
   @Container static final KafkaContainer KAFKA = new KafkaContainer("apache/kafka:3.8.0");
 
+  @Container
+  static final PostgreSQLContainer<?> POSTGRES = new PostgreSQLContainer<>("postgres:16-alpine");
+
   @DynamicPropertySource
-  static void kafka(DynamicPropertyRegistry registry) {
+  static void infrastructure(DynamicPropertyRegistry registry) {
     registry.add("spring.kafka.bootstrap-servers", KAFKA::getBootstrapServers);
+    registry.add("spring.datasource.url", POSTGRES::getJdbcUrl);
+    registry.add("spring.datasource.username", POSTGRES::getUsername);
+    registry.add("spring.datasource.password", POSTGRES::getPassword);
   }
+
+  @Autowired FakeLlmProvider provider;
+  @Autowired PipelineRunner runner;
+  @Autowired ResultLedger ledger;
 
   /** The default fake, except that events containing POISON get an answer that is not JSON. */
   @TestConfiguration
   static class PoisonAwareProvider {
     @Bean
-    LlmProvider llmProvider() {
+    FakeLlmProvider llmProvider() {
       SchemaAwareResponder responder = new SchemaAwareResponder();
       return new FakeLlmProvider(
           req ->
@@ -67,6 +82,9 @@ class DisputeTriagePipelineIT {
 
   @Test
   void enrichesDisputesAndDeadLettersUnusableAnswers() throws Exception {
+    assertThat(runner.transactional()).isTrue();
+    assertThat(ledger).isInstanceOf(PostgresResultLedger.class);
+
     Map<String, String> events =
         Map.of(
             "card-1001",
@@ -95,10 +113,37 @@ class DisputeTriagePipelineIT {
           (r.topic().equals(OUTPUT) ? enriched : deadLettered).add(r);
         }
       }
-    }
 
-    assertThat(enriched).hasSize(2);
-    assertThat(deadLettered).hasSize(1);
+      assertThat(enriched).hasSize(2);
+      assertThat(deadLettered).hasSize(1);
+      long callsBeforeReplay = provider.calls();
+      assertThat(callsBeforeReplay).isEqualTo(3);
+
+      // Re-publish the first dispute with its fields in another order: same canonical input, so
+      // the ledger answers it and no provider call is made.
+      String reordered =
+          "{\"note\":\"I was charged twice this month, please refund the duplicate charge.\","
+              + "\"amount\":12.99,\"merchant\":\"Acme Streaming\",\"disputeId\":\"D-1001\"}";
+      try (KafkaProducer<String, String> producer = producer()) {
+        producer.send(new ProducerRecord<>(INPUT, "card-1001", reordered)).get();
+      }
+      ConsumerRecord<String, String> replayed = null;
+      deadline = Instant.now().plus(Duration.ofSeconds(60));
+      while (replayed == null && Instant.now().isBefore(deadline)) {
+        for (ConsumerRecord<String, String> r : consumer.poll(Duration.ofMillis(500))) {
+          replayed = r;
+        }
+      }
+      assertThat(replayed).isNotNull();
+      assertThat(replayed.topic()).isEqualTo(OUTPUT);
+      assertThat(header(replayed, EnricherHeaders.RESULT_SOURCE)).isEqualTo("ledger");
+      assertThat(provider.calls()).isEqualTo(callsBeforeReplay);
+      JsonNode replayEnvelope = MAPPER.readTree(replayed.value());
+      JsonNode firstEnvelope = MAPPER.readTree(valueOf(enriched, "card-1001"));
+      assertThat(replayEnvelope.get("enrichment")).isEqualTo(firstEnvelope.get("enrichment"));
+      assertThat(replayEnvelope.get("usage")).isEqualTo(firstEnvelope.get("usage"));
+      assertThat(replayEnvelope.get("inputHash")).isEqualTo(firstEnvelope.get("inputHash"));
+    }
 
     for (ConsumerRecord<String, String> r : enriched) {
       JsonNode envelope = MAPPER.readTree(r.value());
@@ -110,6 +155,7 @@ class DisputeTriagePipelineIT {
       assertThat(header(r, EnricherHeaders.INPUT_HASH))
           .isEqualTo(envelope.path("inputHash").asText());
       assertThat(header(r, EnricherHeaders.PIPELINE)).isEqualTo("dispute-triage");
+      assertThat(header(r, EnricherHeaders.RESULT_SOURCE)).isEqualTo("provider");
     }
     for (ConsumerRecord<String, String> r : enriched) {
       // Printed so the README sample output can be taken from a real run.
@@ -127,6 +173,10 @@ class DisputeTriagePipelineIT {
     assertThat(dead.value()).isEqualTo(events.get("card-1003"));
     assertThat(header(dead, EnricherHeaders.FAILURE_REASON)).isEqualTo("INVALID_JSON");
     assertThat(header(dead, EnricherHeaders.PIPELINE)).isEqualTo("dispute-triage");
+  }
+
+  private static String valueOf(List<ConsumerRecord<String, String>> records, String key) {
+    return records.stream().filter(r -> key.equals(r.key())).findFirst().orElseThrow().value();
   }
 
   private static String categoryOf(List<ConsumerRecord<String, String>> records, String key)
@@ -158,6 +208,7 @@ class DisputeTriagePipelineIT {
     props.put(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, KAFKA.getBootstrapServers());
     props.put(ConsumerConfig.GROUP_ID_CONFIG, "it-reader");
     props.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest");
+    props.put(ConsumerConfig.ISOLATION_LEVEL_CONFIG, "read_committed");
     props.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class.getName());
     props.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class.getName());
     return new KafkaConsumer<>(props);

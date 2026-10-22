@@ -69,6 +69,26 @@ jobs:
               awk -F, -v m="${csv%%/*}" 'NR>1 {c+=$9; x+=$8} END {if (c+x>0) printf "| %s | %d | %d | %.1f |\n", m, c, x, 100*c/(c+x)}' "$csv"
             done
           } >> "$GITHUB_STEP_SUMMARY"
+      - name: Chaos test summary
+        if: always()
+        run: |
+          log=enricher-app/target/failsafe-reports/io.github.xeeshan16.enricher.chaos.ExactlyOnceChaosIT-output.txt
+          if [ -f "$log" ]; then
+            {
+              echo "### Exactly-once chaos test"
+              echo '```'
+              grep -E "chaos: (committed|ledger)" "$log" | sed -E 's/.*(chaos: )/\1/'
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Upload resolved Maven repository (offline builds)
+        if: github.ref == 'refs/heads/dev'
+        uses: actions/upload-artifact@v4
+        with:
+          name: m2-repository
+          path: ~/.m2/repository
+          retention-days: 3
+          if-no-files-found: ignore
       - name: Upload test and coverage reports
         if: always()
         uses: actions/upload-artifact@v4
