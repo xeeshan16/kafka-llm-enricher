@@ -6,10 +6,15 @@ public enum FailureReason {
   INVALID_JSON,
   /** The answer was JSON but did not satisfy the pipeline's output schema. */
   SCHEMA_VIOLATION,
-  /** The provider failed with a non-retryable error, or retries were exhausted. */
+  /** The provider failed with a non-retryable error (bad request, authentication). */
   PROVIDER_ERROR,
-  /** Another worker held the record's ledger lease for longer than the retry budget. */
+  /**
+   * A retryable provider failure (timeout, throttling, 5xx) persisted through every in-place
+   * attempt and every retry topic.
+   */
+  RETRIES_EXHAUSTED,
+  /** Another worker held the record's ledger lease for longer than every retry allowed. */
   LEDGER_BUSY,
-  /** Anything else, for example the output topic could not be written. */
+  /** Anything else, for example a bug or an exception thrown while handling the record. */
   PROCESSING_ERROR
 }
