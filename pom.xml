@@ -35,6 +35,7 @@
   <modules>
     <module>enricher-core</module>
     <module>enricher-ledger-postgres</module>
+    <module>enricher-kafka</module>
     <module>enricher-spring-boot-starter</module>
     <module>enricher-app</module>
   </modules>
@@ -59,6 +60,11 @@
       <dependency>
         <groupId>io.github.xeeshan16</groupId>
         <artifactId>enricher-ledger-postgres</artifactId>
+        <version>${project.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>io.github.xeeshan16</groupId>
+        <artifactId>enricher-kafka</artifactId>
         <version>${project.version}</version>
       </dependency>
       <dependency>
