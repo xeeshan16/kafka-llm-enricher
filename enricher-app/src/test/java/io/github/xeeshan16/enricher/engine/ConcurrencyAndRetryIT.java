@@ -14,6 +14,7 @@ import io.github.xeeshan16.enricher.spring.PipelineRunner;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Properties;
@@ -258,7 +259,7 @@ class ConcurrencyAndRetryIT {
                 rs.stream().filter(r -> r.topic().equals("it.flaky.out")).count() >= 3
                     && rs.stream().filter(r -> r.topic().equals("it.flaky.enricher-dlq")).count()
                         >= 3);
-    Map<String, ConsumerRecord<String, String>> byId = new ConcurrentHashMap<>();
+    Map<String, ConsumerRecord<String, String>> byId = new HashMap<>();
     for (ConsumerRecord<String, String> r : records) {
       byId.put(idOf(r.value()), r);
     }

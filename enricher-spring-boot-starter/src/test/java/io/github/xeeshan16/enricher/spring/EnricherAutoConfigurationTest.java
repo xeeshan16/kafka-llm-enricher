@@ -54,7 +54,7 @@ class EnricherAutoConfigurationTest {
           assertThat(context.getBean(PipelineRunner.class).transactional()).isFalse();
           assertThat(context.getBean(LedgeredEnricher.class).settings().leaseTtl())
               .isEqualTo(Duration.ofMinutes(2));
-          PipelineRegistry.Runtime runtime = registry.runtime("triage");
+          PipelineRegistry.PipelineRuntime runtime = registry.runtime("triage");
           assertThat(runtime.engine().ordering()).isEqualTo(OrderingMode.KEY);
           assertThat(runtime.engine().maxInFlight()).isEqualTo(16);
           assertThat(runtime.engine().maxPendingPerPartition()).isEqualTo(500);
@@ -90,7 +90,7 @@ class EnricherAutoConfigurationTest {
         .run(
             context -> {
               assertThat(context).hasNotFailed();
-              PipelineRegistry.Runtime runtime =
+              PipelineRegistry.PipelineRuntime runtime =
                   context.getBean(PipelineRegistry.class).runtime("triage");
               assertThat(runtime.concurrency()).isEqualTo(3);
               assertThat(runtime.engine().ordering()).isEqualTo(OrderingMode.PARTITION);

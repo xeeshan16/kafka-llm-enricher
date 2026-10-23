@@ -86,7 +86,7 @@ public final class PipelineRunner implements SmartLifecycle {
       log.warn("no pipelines configured under enricher.pipelines; nothing to consume");
     }
     for (PipelineDefinition pipeline : registry.pipelines()) {
-      PipelineRegistry.Runtime runtime = registry.runtime(pipeline.name());
+      PipelineRegistry.PipelineRuntime runtime = registry.runtime(pipeline.name());
       EnrichmentProcessor processor =
           new EnrichmentProcessor(
               pipeline, enricher, runtime.retryTopics(), outputs, busyRetryInterval, busyBudget);
