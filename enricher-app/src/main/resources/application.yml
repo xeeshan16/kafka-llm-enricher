@@ -31,6 +31,12 @@ enricher:
   auto-startup: ${ENRICHER_AUTO_STARTUP:true}
   provider: ${ENRICHER_PROVIDER:fake}
   delivery: ${ENRICHER_DELIVERY:auto}
+  # Timeout and in-place retries (full jitter) of every model call.
+  resilience:
+    call-timeout: ${ENRICHER_CALL_TIMEOUT:30s}
+    max-attempts: ${ENRICHER_MAX_ATTEMPTS:3}
+    initial-backoff: 200ms
+    max-backoff: 5s
   ledger:
     store: ${ENRICHER_LEDGER_STORE:auto}
     lease-ttl: ${ENRICHER_LEDGER_LEASE_TTL:2m}
@@ -47,6 +53,13 @@ enricher:
       dead-letter-topic: payments.disputes.enricher-dlq
       prompt-version: v1
       model: ${ENRICHER_DISPUTE_MODEL:fake-1}
+      # Per-key order within a partition; unrelated keys are enriched in parallel.
+      ordering: key
+      max-in-flight: ${ENRICHER_MAX_IN_FLIGHT:16}
+      max-pending-per-partition: 500
+      # Retryable failures that survive the in-place attempts go to
+      # payments.disputes.enricher-retry-1 (after 10 s), then -2 (after 1 min), then the DLQ.
+      retry-delays: 10s,1m
       max-output-tokens: 256
       output-schema: classpath:schemas/dispute-triage.v1.json
       system-prompt: |

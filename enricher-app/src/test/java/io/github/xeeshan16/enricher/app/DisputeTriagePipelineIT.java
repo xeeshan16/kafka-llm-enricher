@@ -4,11 +4,11 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.github.xeeshan16.enricher.kafka.EnricherHeaders;
 import io.github.xeeshan16.enricher.ledger.ResultLedger;
 import io.github.xeeshan16.enricher.ledger.postgres.PostgresResultLedger;
 import io.github.xeeshan16.enricher.llm.fake.FakeLlmProvider;
 import io.github.xeeshan16.enricher.llm.fake.SchemaAwareResponder;
-import io.github.xeeshan16.enricher.spring.EnricherHeaders;
 import io.github.xeeshan16.enricher.spring.PipelineRunner;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;

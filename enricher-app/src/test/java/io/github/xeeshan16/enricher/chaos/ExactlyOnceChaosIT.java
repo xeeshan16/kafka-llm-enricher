@@ -2,15 +2,15 @@ package io.github.xeeshan16.enricher.chaos;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-import io.github.xeeshan16.enricher.engine.EnrichmentOutcome;
-import io.github.xeeshan16.enricher.engine.ResultSource;
+import io.github.xeeshan16.enricher.kafka.EngineStats;
+import io.github.xeeshan16.enricher.kafka.KafkaClientFactory;
+import io.github.xeeshan16.enricher.kafka.PropertiesKafkaClientFactory;
 import io.github.xeeshan16.enricher.llm.LlmProvider;
 import io.github.xeeshan16.enricher.llm.fake.FakeLlmProvider;
 import io.github.xeeshan16.enricher.llm.fake.SchemaAwareResponder;
-import io.github.xeeshan16.enricher.pipeline.PipelineDefinition;
-import io.github.xeeshan16.enricher.spring.EnrichedRecordSink;
-import io.github.xeeshan16.enricher.spring.KafkaEnrichedRecordSink;
 import io.github.xeeshan16.enricher.spring.PipelineRunner;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Proxy;
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.ResultSet;
@@ -24,16 +24,21 @@ import java.util.Map;
 import java.util.Properties;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import org.apache.kafka.clients.consumer.Consumer;
 import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.clients.consumer.KafkaConsumer;
 import org.apache.kafka.clients.producer.KafkaProducer;
+import org.apache.kafka.clients.producer.Producer;
 import org.apache.kafka.clients.producer.ProducerConfig;
 import org.apache.kafka.clients.producer.ProducerRecord;
+import org.apache.kafka.common.KafkaException;
 import org.apache.kafka.common.serialization.StringDeserializer;
 import org.apache.kafka.common.serialization.StringSerializer;
 import org.junit.jupiter.api.AfterEach;
@@ -46,7 +51,8 @@ import org.springframework.boot.autoconfigure.EnableAutoConfiguration;
 import org.springframework.boot.builder.SpringApplicationBuilder;
 import org.springframework.context.ConfigurableApplicationContext;
 import org.springframework.context.annotation.Bean;
-import org.springframework.kafka.core.KafkaTemplate;
+import org.springframework.kafka.core.ConsumerFactory;
+import org.springframework.kafka.core.ProducerFactory;
 import org.testcontainers.containers.PostgreSQLContainer;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
@@ -57,18 +63,19 @@ import org.testcontainers.kafka.KafkaContainer;
  * under injected failures:
  *
  * <ul>
- *   <li><b>Crash after the result is stored but before the Kafka transaction commits</b>: for every
- *       fifth dispute, the first publish attempt throws after writing the envelope, so the
- *       transaction aborts and the record is redelivered.
- *   <li><b>Zombie worker and rebalance</b>: the first worker to see one particular dispute hangs in
- *       the provider call for longer than {@code max.poll.interval.ms}. It is expelled from the
- *       group, the other instance takes over its partitions, finds the key leased and waits; when
- *       the zombie's call returns it stores the result, its own commit is fenced, and the new owner
- *       publishes the stored result.
+ *   <li><b>Crash after the result is stored but before the Kafka transaction commits</b>: the first
+ *       commit attempt of every transaction that carries one of every fifth dispute's envelope
+ *       throws, so the transaction aborts and its partitions are rewound and processed again.
+ *   <li><b>A slow call across a rebalance</b>: the first worker to see one particular dispute hangs
+ *       in the provider call for 14 s, more than twice {@code max.poll.interval.ms}. While it hangs
+ *       a third instance joins the group, so partitions move mid-call. The poll loop keeps polling,
+ *       so nobody is expelled; whoever owns the record next finds its key leased, waits, and
+ *       publishes the stored result once the slow call returns.
  * </ul>
  *
  * <p>The assertions are the product's claims: a {@code read_committed} reader sees exactly one
- * envelope per input, and the provider is called exactly once per input.
+ * envelope per input, the provider is called exactly once per input, and no consumer lost its
+ * partitions to a poll timeout.
  */
 @Testcontainers
 class ExactlyOnceChaosIT {
@@ -92,12 +99,13 @@ class ExactlyOnceChaosIT {
   static final Map<String, AtomicInteger> CALLS = new ConcurrentHashMap<>();
 
   static final AtomicBoolean HUNG = new AtomicBoolean();
+  static final CountDownLatch HANG_STARTED = new CountDownLatch(1);
   static final Set<String> CRASHED = ConcurrentHashMap.newKeySet();
   static final AtomicInteger INJECTED_CRASHES = new AtomicInteger();
 
   private final List<ConfigurableApplicationContext> instances = new ArrayList<>();
 
-  /** One enricher instance: the standard auto-configuration plus the chaos provider and sink. */
+  /** One enricher instance: the standard auto-configuration plus the chaos provider and clients. */
   @SpringBootConfiguration
   @EnableAutoConfiguration
   static class ChaosInstance {
@@ -111,6 +119,7 @@ class ExactlyOnceChaosIT {
             CALLS.computeIfAbsent(id, k -> new AtomicInteger()).incrementAndGet();
             if (id.equals(HANG_ID) && HUNG.compareAndSet(false, true)) {
               log.info("chaos: hanging the provider call for {} for {}", id, HANG);
+              HANG_STARTED.countDown();
               sleep(HANG);
               log.info("chaos: provider call for {} returns", id);
             }
@@ -118,24 +127,65 @@ class ExactlyOnceChaosIT {
           });
     }
 
+    /** Real Kafka clients, with producers that fail some commits on purpose. */
     @Bean
-    @SuppressWarnings("unchecked")
-    EnrichedRecordSink chaosSink(KafkaTemplate<?, ?> template) {
-      EnrichedRecordSink delegate =
-          new KafkaEnrichedRecordSink(
-              (KafkaTemplate<String, String>) template, Duration.ofSeconds(30));
-      return (PipelineDefinition pipeline,
-          String key,
-          EnrichmentOutcome.Enriched outcome,
-          ResultSource source) -> {
-        delegate.publish(pipeline, key, outcome, source);
-        int n = Integer.parseInt(key.substring(2));
-        if (n % 5 == 0 && CRASHED.add(key)) {
-          INJECTED_CRASHES.incrementAndGet();
-          throw new IllegalStateException("chaos: crash after publishing " + key);
+    KafkaClientFactory chaosClients(
+        ConsumerFactory<?, ?> consumerFactory, ProducerFactory<?, ?> producerFactory) {
+      PropertiesKafkaClientFactory real =
+          new PropertiesKafkaClientFactory(
+              consumerFactory.getConfigurationProperties(),
+              producerFactory.getConfigurationProperties());
+      return new KafkaClientFactory() {
+        @Override
+        public Consumer<String, String> createConsumer(String groupId, String clientId) {
+          return real.createConsumer(groupId, clientId);
+        }
+
+        @Override
+        public Producer<String, String> createProducer(String clientId, String transactionalId) {
+          return crashing(real.createProducer(clientId, transactionalId));
         }
       };
     }
+  }
+
+  /**
+   * Wraps a transactional producer so that the first commit of a transaction containing an envelope
+   * for dispute 5, 10, 15, ... throws instead of committing, as if the process died after the
+   * ledger stored the result. The loop aborts the transaction and rewinds.
+   */
+  @SuppressWarnings("unchecked")
+  static Producer<String, String> crashing(Producer<String, String> delegate) {
+    List<String> keysInTransaction = new ArrayList<>();
+    return (Producer<String, String>)
+        Proxy.newProxyInstance(
+            Producer.class.getClassLoader(),
+            new Class<?>[] {Producer.class},
+            (proxy, method, args) -> {
+              switch (method.getName()) {
+                case "beginTransaction" -> keysInTransaction.clear();
+                case "send" ->
+                    keysInTransaction.add((String) ((ProducerRecord<?, ?>) args[0]).key());
+                case "commitTransaction" -> {
+                  List<String> crash =
+                      keysInTransaction.stream()
+                          .filter(k -> Integer.parseInt(k.substring(2)) % 5 == 0)
+                          .filter(k -> !CRASHED.contains(k))
+                          .toList();
+                  if (!crash.isEmpty()) {
+                    CRASHED.addAll(crash);
+                    INJECTED_CRASHES.incrementAndGet();
+                    throw new KafkaException("chaos: crash before committing " + crash);
+                  }
+                }
+                default -> {}
+              }
+              try {
+                return method.invoke(delegate, args);
+              } catch (InvocationTargetException e) {
+                throw e.getCause();
+              }
+            });
   }
 
   @AfterEach
@@ -170,6 +220,11 @@ class ExactlyOnceChaosIT {
       }
     }
 
+    // Move partitions while the slow call is in flight.
+    assertThat(HANG_STARTED.await(60, TimeUnit.SECONDS)).as("the slow call started").isTrue();
+    log.info("chaos: starting a third instance during the slow call");
+    start("c");
+
     Map<String, Integer> committed = new HashMap<>();
     Instant deadline = Instant.now().plus(Duration.ofSeconds(150));
     try (KafkaConsumer<String, String> reader = consumer("read_committed", "chaos-reader")) {
@@ -191,16 +246,26 @@ class ExactlyOnceChaosIT {
     }
 
     int uncommitted = countAll("read_uncommitted");
+    EngineStats.Snapshot ab = stats(a).plus(stats(b));
     log.info(
-        "chaos: committed={} uncommitted={} injectedCrashes={} hung={} calls={}",
+        "chaos: committed={} uncommitted={} crashedKeys={} abortedTransactions={} hung={}"
+            + " revoked={} lost={} calls={}",
         committed.values().stream().mapToInt(Integer::intValue).sum(),
         uncommitted,
+        CRASHED.size(),
         INJECTED_CRASHES.get(),
         HUNG.get(),
+        ab.partitionsRevoked(),
+        ab.partitionsLost(),
         CALLS);
 
-    assertThat(HUNG).as("the zombie scenario ran").isTrue();
-    assertThat(INJECTED_CRASHES.get()).isEqualTo(DISPUTES / 5);
+    assertThat(HUNG).as("the slow-call scenario ran").isTrue();
+    assertThat(CRASHED).as("every fifth dispute crashed once").hasSize(DISPUTES / 5);
+    assertThat(INJECTED_CRASHES.get()).isPositive();
+    assertThat(ab.partitionsRevoked()).as("the third instance moved partitions").isPositive();
+    assertThat(ab.partitionsLost())
+        .as("a 14 s call did not expel anyone from the group (max.poll.interval.ms = 6 s)")
+        .isZero();
     assertThat(committed).hasSize(DISPUTES);
     assertThat(committed.values()).as("exactly one envelope per input").containsOnly(1);
     assertThat(CALLS).hasSize(DISPUTES);
@@ -208,7 +273,7 @@ class ExactlyOnceChaosIT {
         .as("exactly one paid call per input")
         .allSatisfy(c -> assertThat(c.get()).isOne());
     // The aborted attempts are really in the log; read_committed readers just never see them.
-    assertThat(uncommitted).isGreaterThan(DISPUTES + INJECTED_CRASHES.get() - 1);
+    assertThat(uncommitted).isGreaterThanOrEqualTo(DISPUTES + CRASHED.size());
 
     try (Connection c =
             DriverManager.getConnection(
@@ -220,8 +285,8 @@ class ExactlyOnceChaosIT {
                     + " FROM enricher_result_ledger")) {
       rs.next();
       assertThat(rs.getLong(1)).isEqualTo(DISPUTES);
-      // Every injected crash and the zombie's record were answered from the ledger on retry.
-      assertThat(rs.getLong(2)).isGreaterThanOrEqualTo(INJECTED_CRASHES.get() + 1);
+      // Every crashed record was answered from the ledger when it was processed again.
+      assertThat(rs.getLong(2)).isGreaterThanOrEqualTo(CRASHED.size());
       log.info("chaos: ledger completed={} hits={}", rs.getLong(1), rs.getLong(2));
     }
   }
@@ -245,6 +310,7 @@ class ExactlyOnceChaosIT {
                 "--enricher.ledger.owner=instance-" + name,
                 "--enricher.ledger.lease-ttl=60s",
                 "--enricher.ledger.busy-wait=1s",
+                "--enricher.resilience.call-timeout=30s",
                 "--enricher.topics.partitions=4");
     instances.add(context);
     return context;
@@ -256,12 +322,7 @@ class ExactlyOnceChaosIT {
     while (Instant.now().isBefore(deadline)) {
       boolean all = true;
       for (ConfigurableApplicationContext context : contexts) {
-        PipelineRunner runner = context.getBean(PipelineRunner.class);
-        boolean assigned =
-            runner.containers().stream()
-                .anyMatch(
-                    c -> c.getAssignedPartitions() != null && !c.getAssignedPartitions().isEmpty());
-        all &= assigned;
+        all &= !context.getBean(PipelineRunner.class).assignedPartitions().isEmpty();
       }
       if (all) {
         return;
@@ -269,6 +330,10 @@ class ExactlyOnceChaosIT {
       Thread.sleep(250);
     }
     throw new AssertionError("instances did not both get partitions");
+  }
+
+  private static EngineStats.Snapshot stats(ConfigurableApplicationContext context) {
+    return context.getBean(PipelineRunner.class).stats("dispute-triage");
   }
 
   private static int countAll(String isolation) {

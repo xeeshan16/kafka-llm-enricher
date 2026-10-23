@@ -2,6 +2,10 @@ package io.github.xeeshan16.enricher.spring;
 
 import io.github.xeeshan16.enricher.engine.Enricher;
 import io.github.xeeshan16.enricher.engine.LedgeredEnricher;
+import io.github.xeeshan16.enricher.kafka.EnvelopeRecordFactory;
+import io.github.xeeshan16.enricher.kafka.KafkaClientFactory;
+import io.github.xeeshan16.enricher.kafka.OutputRecordFactory;
+import io.github.xeeshan16.enricher.kafka.PropertiesKafkaClientFactory;
 import io.github.xeeshan16.enricher.ledger.InMemoryResultLedger;
 import io.github.xeeshan16.enricher.ledger.NoopResultLedger;
 import io.github.xeeshan16.enricher.ledger.ResultLedger;
@@ -9,6 +13,7 @@ import io.github.xeeshan16.enricher.llm.EmbeddingProvider;
 import io.github.xeeshan16.enricher.llm.LlmProvider;
 import io.github.xeeshan16.enricher.llm.fake.FakeEmbeddingProvider;
 import io.github.xeeshan16.enricher.llm.fake.FakeLlmProvider;
+import io.github.xeeshan16.enricher.llm.resilience.ResilientLlmProvider;
 import io.github.xeeshan16.enricher.pipeline.PipelineDefinition;
 import java.net.InetAddress;
 import java.net.UnknownHostException;
@@ -33,22 +38,20 @@ import org.springframework.kafka.config.TopicBuilder;
 import org.springframework.kafka.core.ConsumerFactory;
 import org.springframework.kafka.core.KafkaAdmin;
 import org.springframework.kafka.core.KafkaTemplate;
-import org.springframework.kafka.transaction.KafkaAwareTransactionManager;
+import org.springframework.kafka.core.ProducerFactory;
 import org.springframework.util.ClassUtils;
-import org.springframework.util.backoff.BackOff;
-import org.springframework.util.backoff.FixedBackOff;
 
 /**
  * Wires enrichment pipelines into a Spring Boot application.
  *
  * <p>Every bean backs off when the application defines its own, so teams can swap the provider, the
- * sink or the retry back-off without forking. Kafka clients come from Spring Boot's {@code
- * spring.kafka.*} configuration; keys and values are read and written as strings.
+ * Kafka clients or the output format without forking. Kafka client settings come from Spring Boot's
+ * {@code spring.kafka.*} configuration; keys and values are read and written as strings.
  *
- * <p>Delivery is exactly-once when Spring Boot configured a Kafka transaction manager ({@code
- * spring.kafka.producer.transaction-id-prefix} is set). The result ledger is PostgreSQL when a
- * {@code DataSource} and the {@code enricher-ledger-postgres} module are present, otherwise in
- * memory; see {@code enricher.delivery} and {@code enricher.ledger.*}.
+ * <p>Delivery is exactly-once when {@code spring.kafka.producer.transaction-id-prefix} is set
+ * (Spring Boot's producer factory is then transaction-capable). The result ledger is PostgreSQL
+ * when a {@code DataSource} and the {@code enricher-ledger-postgres} module are present, otherwise
+ * in memory; see {@code enricher.delivery} and {@code enricher.ledger.*}.
  */
 @AutoConfiguration(
     after = KafkaAutoConfiguration.class,
@@ -77,10 +80,23 @@ public class EnricherAutoConfiguration {
     return new FakeEmbeddingProvider(256);
   }
 
+  /**
+   * The enricher, calling the provider through {@link ResilientLlmProvider} (per-call timeout and
+   * full-jitter retries from {@code enricher.resilience.*}). The {@code LlmProvider} bean itself
+   * stays unwrapped.
+   */
   @Bean
   @ConditionalOnMissingBean
-  public Enricher enricher(LlmProvider provider) {
-    return new Enricher(provider);
+  public Enricher enricher(LlmProvider provider, EnricherProperties properties) {
+    return new Enricher(new ResilientLlmProvider(provider, policy(properties.resilience())));
+  }
+
+  static ResilientLlmProvider.Policy policy(EnricherProperties.Resilience resilience) {
+    return new ResilientLlmProvider.Policy(
+        resilience.callTimeout(),
+        resilience.maxAttempts(),
+        resilience.initialBackoff(),
+        resilience.maxBackoff());
   }
 
   @Bean
@@ -146,6 +162,14 @@ public class EnricherAutoConfiguration {
   public LedgeredEnricher enricherLedgeredEnricher(
       Enricher enricher, ResultLedger ledger, EnricherProperties properties) {
     EnricherProperties.Ledger l = properties.ledger();
+    Duration worstCall = policy(properties.resilience()).worstCase();
+    if (l.leaseTtl().compareTo(worstCall) < 0) {
+      log.warn(
+          "enricher.ledger.lease-ttl ({}) is shorter than the worst-case provider call with retries"
+              + " ({}); a lease can lapse mid-call and let a second worker pay for the same key",
+          l.leaseTtl(),
+          worstCall);
+    }
     return new LedgeredEnricher(
         enricher,
         ledger,
@@ -159,80 +183,70 @@ public class EnricherAutoConfiguration {
   }
 
   @Bean
-  @ConditionalOnMissingBean(name = "enricherRetryBackOff")
-  public BackOff enricherRetryBackOff() {
-    return new FixedBackOff(500L, 2L);
+  @ConditionalOnMissingBean
+  public OutputRecordFactory enricherOutputRecordFactory() {
+    return new EnvelopeRecordFactory();
+  }
+
+  /**
+   * Kafka clients for the consumer loops, built from Spring Boot's consumer and producer
+   * configuration ({@code spring.kafka.*}), with string (de)serialisers and manual commits forced.
+   */
+  @Bean
+  @ConditionalOnMissingBean
+  public KafkaClientFactory enricherKafkaClientFactory(
+      ConsumerFactory<?, ?> consumerFactory, ProducerFactory<?, ?> producerFactory) {
+    return new PropertiesKafkaClientFactory(
+        consumerFactory.getConfigurationProperties(), producerFactory.getConfigurationProperties());
   }
 
   @Bean
   @ConditionalOnMissingBean
-  @SuppressWarnings("unchecked")
-  public EnrichedRecordSink enricherRecordSink(KafkaTemplate<?, ?> kafkaTemplate) {
-    return new KafkaEnrichedRecordSink(
-        (KafkaTemplate<String, String>) kafkaTemplate, Duration.ofSeconds(30));
-  }
-
-  @Bean
-  @ConditionalOnMissingBean
-  @SuppressWarnings("unchecked")
   public PipelineRunner enricherPipelineRunner(
       EnricherProperties properties,
       PipelineRegistry registry,
       LedgeredEnricher enricher,
-      ConsumerFactory<?, ?> consumerFactory,
-      KafkaTemplate<?, ?> kafkaTemplate,
-      EnrichedRecordSink sink,
-      BackOff enricherRetryBackOff,
-      ObjectProvider<KafkaAwareTransactionManager<?, ?>> transactionManagers) {
-    KafkaAwareTransactionManager<?, ?> transactionManager =
-        transactionManager(properties.delivery(), kafkaTemplate, transactionManagers);
+      KafkaClientFactory clients,
+      OutputRecordFactory outputs,
+      ProducerFactory<?, ?> producerFactory) {
+    String transactionIdPrefix =
+        exactlyOnce(properties.delivery(), producerFactory)
+            ? producerFactory.getTransactionIdPrefix()
+            : null;
     return new PipelineRunner(
         registry,
         enricher,
-        (ConsumerFactory<String, String>) consumerFactory,
-        (KafkaTemplate<String, String>) kafkaTemplate,
-        sink,
-        enricherRetryBackOff,
-        busyBackOff(properties.ledger()),
-        transactionManager,
+        clients,
+        outputs,
+        transactionIdPrefix,
+        properties.ledger().busyRetryInterval(),
+        busyBudget(properties.ledger()),
         properties.autoStartup());
   }
 
-  /** Resolves the delivery mode to a transaction manager, or {@code null} for at-least-once. */
-  static KafkaAwareTransactionManager<?, ?> transactionManager(
-      EnricherProperties.Delivery delivery,
-      KafkaTemplate<?, ?> template,
-      ObjectProvider<KafkaAwareTransactionManager<?, ?>> transactionManagers) {
-    KafkaAwareTransactionManager<?, ?> available = transactionManagers.getIfUnique();
+  /** Resolves the delivery mode: whether the loops use Kafka transactions. */
+  static boolean exactlyOnce(EnricherProperties.Delivery delivery, ProducerFactory<?, ?> factory) {
+    boolean capable = factory.transactionCapable();
     return switch (delivery) {
-      case AUTO -> available;
+      case AUTO -> capable;
       case EXACTLY_ONCE -> {
-        if (available == null) {
+        if (!capable) {
           throw new IllegalStateException(
-              "enricher.delivery=exactly-once needs a Kafka transaction manager; set"
+              "enricher.delivery=exactly-once needs Kafka transactions; set"
                   + " spring.kafka.producer.transaction-id-prefix (unique per instance)");
         }
-        yield available;
+        yield true;
       }
-      case AT_LEAST_ONCE -> {
-        if (template.isTransactional() && !template.isAllowNonTransactional()) {
-          throw new IllegalStateException(
-              "enricher.delivery=at-least-once cannot publish with a transactional KafkaTemplate;"
-                  + " remove spring.kafka.producer.transaction-id-prefix");
-        }
-        yield null;
-      }
+      case AT_LEAST_ONCE -> false;
     };
   }
 
   /**
-   * Back-off for records whose ledger key stays leased by another worker: keep retrying for about
-   * one lease lifetime, after which the lease has lapsed and the retry can claim it.
+   * How long a record waits for a key leased by another worker before moving to a retry topic: one
+   * lease lifetime plus one in-place wait, after which the lease has lapsed or been completed.
    */
-  static BackOff busyBackOff(EnricherProperties.Ledger ledger) {
-    long cycleMillis = Math.max(1, ledger.busyRetryInterval().plus(ledger.busyWait()).toMillis());
-    long attempts = ledger.leaseTtl().toMillis() / cycleMillis + 3;
-    return new FixedBackOff(ledger.busyRetryInterval().toMillis(), attempts);
+  static Duration busyBudget(EnricherProperties.Ledger ledger) {
+    return ledger.leaseTtl().plus(ledger.busyWait());
   }
 
   @Bean
@@ -243,12 +257,15 @@ public class EnricherAutoConfiguration {
         topicsToCreate(registry, properties.topics()).toArray(NewTopic[]::new));
   }
 
-  /** Input, output and dead-letter topics of every pipeline, each once, in declaration order. */
+  /**
+   * Input, retry, output and dead-letter topics of every pipeline, each once, in declaration order.
+   */
   static List<NewTopic> topicsToCreate(
       PipelineRegistry registry, EnricherProperties.Topics topics) {
     Set<String> names = new LinkedHashSet<>();
     for (PipelineDefinition pipeline : registry.pipelines()) {
       names.add(pipeline.inputTopic());
+      names.addAll(registry.runtime(pipeline.name()).retryTopics().topics());
       names.add(pipeline.outputTopic());
       names.add(pipeline.deadLetterTopic());
     }
