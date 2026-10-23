@@ -44,6 +44,7 @@ class ConsumerLoopTest {
   /** A transactional mock producer whose next commits can be made to fail. */
   static final class FlakyProducer extends MockProducer<String, String> {
     final AtomicInteger failCommits = new AtomicInteger();
+    final AtomicInteger aborts = new AtomicInteger();
 
     FlakyProducer() {
       super(true, new StringSerializer(), new StringSerializer());
@@ -55,6 +56,12 @@ class ConsumerLoopTest {
         throw new KafkaException("injected commit failure");
       }
       super.commitTransaction();
+    }
+
+    @Override
+    public synchronized void abortTransaction() throws ProducerFencedException {
+      aborts.incrementAndGet();
+      super.abortTransaction();
     }
   }
 
@@ -189,17 +196,20 @@ class ConsumerLoopTest {
 
   @Test
   void keyLanesRunInParallelButNeverTwoRecordsOfOneKeyAtOnce() {
+    // Lanes are per key within a partition: the same key on two partitions may run in parallel.
     Map<String, AtomicInteger> running = new ConcurrentHashMap<>();
     AtomicInteger overlaps = new AtomicInteger();
     Echo echo =
         new Echo(
             r -> {
-              if (running.computeIfAbsent(r.key(), k -> new AtomicInteger()).incrementAndGet()
+              if (running
+                      .computeIfAbsent(r.partition() + "/" + r.key(), k -> new AtomicInteger())
+                      .incrementAndGet()
                   > 1) {
                 overlaps.incrementAndGet();
               }
               sleep(ThreadLocalRandom.current().nextLong(1, 8));
-              running.get(r.key()).decrementAndGet();
+              running.get(r.partition() + "/" + r.key()).decrementAndGet();
             });
     start(echo, EngineSettings.defaults().withMaxInFlight(8), "tx-test");
 
@@ -343,7 +353,7 @@ class ConsumerLoopTest {
     }
 
     await("all committed", () -> committed().getOrDefault(P0, 0L) == 5L);
-    assertThat(producer.transactionAborted()).isTrue();
+    assertThat(producer.aborts).hasValue(1);
     assertThat(outputs("out"))
         .as("aborted output is not visible")
         .containsExactlyElementsOf(range("v", 5));
