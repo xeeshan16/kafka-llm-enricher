@@ -89,3 +89,33 @@
 
 - Day 3 replaced Spring Kafka's listener containers with an own loop on `kafka-clients` (ADR 0003): container-managed transactions cannot be combined with asynchronous listeners, and a blocking listener cannot stop slow calls from triggering rebalances.
 - At the start of day 4 there was no day-3 progress entry, `main` had not been fast-forwarded and no day-3 Slack post had gone out, although the day-3 code was green on `dev`. Day 4 picked those up first.
+
+## Day 4 (2026-10-24): cost and rate control
+
+**Built**
+
+- `enricher-core`
+  - `llm.ratelimit`: `TokenBucket` (reservations with debt, Retry-After blocking), `AimdLimiter` (additive increase, multiplicative decrease with a cooldown), `ProviderRateLimiter` (RPM and TPM buckets plus AIMD; estimates settled against reported usage; refuses waits longer than `max-wait` as retryable), `RateLimitedLlmProvider`, `LlmThrottledException`.
+  - `cost`: `PriceTable` (USD per million tokens, cost in micro-USD), `BudgetPeriod`, `BudgetLimit`, `BudgetStore` with `InMemoryBudgetStore`, `TenantBudgets` (worst-case reservations, settle, refund), `TenantResolver`, `SkipRule`, `OverBudgetAction`, `CostPolicy`, `UsageMeter` and `UsageAccounting`.
+  - `LedgeredEnricher` applies a `CostPolicy`: skip rules, then the ledger (hits are free), then a budget reservation only for paid calls, then downgrade / skip / defer. `EnrichmentOutcome.Skipped` and `Deferred`, skipped envelopes.
+- `enricher-kafka`: skipped envelopes on the output topic (or nothing), deferred records on `<input>.enricher-deferred` with a not-before at the window reset, `enricher-tenant` and `enricher-skip-reason` headers.
+- `enricher-ledger-postgres`: `PostgresBudgetStore` (one conditional upsert per charge) and migration V2.
+- `enricher-spring-boot-starter`: `enricher.rate-limit.*`, `enricher.pricing.*`, `enricher.budgets.store`, per-pipeline `tenant`, `skip.*`, `emit-skipped`, `budget.*`. SpEL in a `SimpleEvaluationContext` with a null-safe, read-only map accessor; expressions and budget settings are validated at startup. Deferred topics are subscribed to and created when a pipeline can defer.
+- `enricher-app`: rate-limit and pricing settings with environment variables, merchant as tenant.
+- Tests: `TokenBucketTest`, `AimdLimiterTest`, `ProviderRateLimiterTest` (including convergence against a provider with a hidden capacity), `PriceTableTest`, `BudgetPeriodTest`, `TenantBudgetsTest` (500 concurrent reservations), `UsageAccountingTest`, `LedgeredEnricherCostTest`, `CostRoutingTest`, `SpelRecordExpressionsTest`, new auto-configuration tests, `PostgresBudgetStoreIT`, `CostControlIT`.
+- ADR 0004: cost and rate controls before the call, in a fixed order.
+
+**Verified**
+
+- In CI on `dev`: run [40097250912](https://github.com/xeeshan16/kafka-llm-enricher/actions/runs/40097250912) for `6bf16b6`: the build job (Error Prone, unit and all Testcontainers tests) passed on the first push; the formatting job failed on line wrapping only, fixed in the next commit.
+- `CostControlIT` (same run): acme 5 x `fake-1`, 1 x `fake-mini`, 6 deferred, spend 10,735 of 12,000 micro-USD; 3 replays answered from the ledger while acme was out of budget; globex 6 enriched; initech 6 skipped with no calls; 12 paid calls, 0 duplicates. Throttling provider (capacity 3): 40 of 40 enriched, 0 dead-lettered, 27 429s, 7 decreases, limit 16 -> 4, at most 3 calls served at once.
+- `PostgresBudgetStoreIT` (same run): 16 threads, 640 charges, 100 granted, counter exactly at the 10,000-token cap.
+- Locally, against distro jars (Maven Central is blocked in the build workspace): the core module's 90 unit tests (with a stub schema validator); the routing classes of `enricher-kafka` with stub Kafka types and `CostRoutingTest` (5 tests); `SpelRecordExpressionsTest` (7 tests) against spring-expression 4.3; `PostgresBudgetStoreIT` (6 tests) against a local PostgreSQL 16. The starter and the Kafka integration tests ran in CI only.
+
+**Notes and plan adjustments**
+
+- `enricher.rate-limit.max-wait` defaults to 5 s so that the default lease (2 min) still covers a worst-case call: 3 attempts x (30 s timeout + 5 s admission) + back-off = 115 s.
+- Rate limits are per instance. A limiter shared across replicas (PostgreSQL or Redis) moves to the roadmap; ADR 0004 explains why it is not needed for v0.1.
+- Metrics export of the new counters (`UsageAccounting`, `ProviderRateLimiter.stats()`) is day 6, together with the rest of the Micrometer and OpenTelemetry work.
+
+**Next (day 5):** JSON Schema repair prompt, PII masking before the prompt, the written threat model, and real providers (OpenAI-compatible including Ollama and vLLM, Anthropic, Azure OpenAI) behind the interface, with 429s mapped to `LlmThrottledException`.

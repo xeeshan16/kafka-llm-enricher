@@ -1,15 +1,15 @@
 # kafka-llm-enricher
 
-**Add LLM enrichment to a Kafka stream as configuration, not as another hand-written consumer: schema-validated answers, dead-lettering with reasons, exactly-once output through Kafka transactions, and a PostgreSQL result ledger so rebalances, retries and replays never pay twice for the same event.**
+**Add LLM enrichment to a Kafka stream as configuration, not as another hand-written consumer: schema-validated answers, exactly-once output, a PostgreSQL result ledger so rebalances, retries and replays never pay twice for the same event, per-key parallelism that never stalls the poll loop, and provider rate limits plus per-tenant budgets so one merchant's burst cannot spend everyone's quota.**
 
-> Status: under active development towards `v0.1.0`. Days 1 and 2 of 7 are done: the core engine, the Spring Boot starter, Kafka transactions and the result ledger, tested end to end against real Kafka and PostgreSQL, including a two-instance chaos test. See [docs/PLAN.md](docs/PLAN.md) and [docs/PROGRESS.md](docs/PROGRESS.md).
+> Status: under active development towards `v0.1.0`. Days 1 to 4 of 7 are done: the core engine, the Spring Boot starter, Kafka transactions and the result ledger, a parallel key-ordered consumer loop with retry topics, and cost controls (rate limiting with adaptive concurrency, per-tenant budgets, skip rules, cost accounting), tested against real Kafka and PostgreSQL. See [docs/PLAN.md](docs/PLAN.md) and [docs/PROGRESS.md](docs/PROGRESS.md).
 
 ## The problem
 
 Teams keep writing the same service: read an event (a card dispute note, a merchant descriptor, a support ticket), ask an LLM to classify it or extract fields, and write an enriched event. The naive version:
 
 - pays again for every rebalance, retry and replay;
-- falls over on provider 429s;
+- falls over on provider 429s, and lets one tenant's burst spend the whole budget;
 - blows `max.poll.interval.ms` and breaks per-key ordering;
 - lets malformed model output either poison the partition or vanish silently.
 
@@ -33,7 +33,27 @@ enricher:
       user-template: |
         Classify this dispute. Merchant: {{event.merchant}}.
         {{event}}
+      # Cost controls (optional)
+      tenant: event.merchantId                      # who pays, SpEL over the event
+      skip:
+        tiny-amount: "event.amount != null and event.amount < 1"   # never sent to the model
+      budget:
+        period: daily
+        max-cost-usd: 50                            # per tenant and day
+        tenants:
+          big-merchant: { max-cost-usd: 500 }
+        on-exceeded: downgrade                      # or defer / skip
+        fallback-model: gpt-4o-mini
+        after-downgrade: defer                      # park until the budget resets
+  rate-limit:
+    requests-per-minute: 500                        # this instance's share of the key's quota
+    tokens-per-minute: 200000
+  pricing:
+    gpt-4o: { input-per-million: 2.50, output-per-million: 10.00 }
+    gpt-4o-mini: { input-per-million: 0.15, output-per-million: 0.60 }
 ```
+
+The prices above are placeholders: put in what your provider charges you.
 
 An input record such as
 
@@ -75,7 +95,7 @@ becomes this envelope on the output topic. This is real output from the integrat
 }
 ```
 
-Token counts from the fake are estimates (four characters per token). The enrichment is written in canonical key order, so an envelope rebuilt from the result ledger is byte-identical to the first one; the `enricher-result-source` header says whether a delivery paid for a model call (`provider`) or reused a stored answer (`ledger`). Records whose answer is not valid JSON or does not satisfy the schema go to the dead-letter topic unchanged, with `enricher-failure-reason` (`INVALID_JSON`, `SCHEMA_VIOLATION`, `PROVIDER_ERROR`, `PROCESSING_ERROR`) and `enricher-failure-detail` headers.
+Token counts from the fake are estimates (four characters per token). The enrichment is written in canonical key order, so an envelope rebuilt from the result ledger is byte-identical to the first one; the `enricher-result-source` header says whether a delivery paid for a model call (`provider`) or reused a stored answer (`ledger`). Records whose answer is not valid JSON or does not satisfy the schema go to the dead-letter topic unchanged, with `enricher-failure-reason` (`INVALID_JSON`, `SCHEMA_VIOLATION`, `PROVIDER_ERROR`, `RETRIES_EXHAUSTED`, `LEDGER_BUSY`, `PROCESSING_ERROR`) and `enricher-failure-detail` headers. Records a skip rule matches produce an envelope with `"enrichment": null` and `"skipped": {"reason": "rule:tiny-amount"}` (or nothing, with `emit-skipped: false`), so the output topic can keep one record per input.
 
 ## Quick start
 
@@ -91,6 +111,8 @@ The integration tests start Kafka and PostgreSQL in Docker and run the `dispute-
 
 - `DisputeTriagePipelineIT` checks the enriched envelopes, the dead-letter path, and that a re-published event is answered from the ledger without a model call.
 - `ExactlyOnceChaosIT` runs two instances in one consumer group, aborts transactions after results are stored, and hangs one worker past `max.poll.interval.ms` so it is expelled mid-call. It asserts one committed envelope and one paid call per input.
+- `ConcurrencyAndRetryIT` checks per-key order while one call takes longer than `max.poll.interval.ms`, retry-topic delays, and dead-letter reasons for permanent, exhausted and poison records.
+- `CostControlIT` runs three tenants against a per-tenant cost cap (downgrade, then defer, never over the cap), a skip rule, free ledger replays for a tenant that is out of budget, and a provider that answers 429 above 3 concurrent calls.
 
 ### Use it in your own Spring Boot service
 
@@ -119,38 +141,48 @@ A `docker compose up` demo with a synthetic dispute stream, a Docker image and a
 flowchart LR
   subgraph Kafka
     IN[(input topic)]
+    RT[(retry topics)]
+    DF[(deferred topic)]
     OUT[(output topic)]
     DLQ[(dead-letter topic)]
   end
   subgraph "enricher (Spring Boot)"
-    C[listener container per pipeline<br/>one Kafka transaction per record] --> L[LedgeredEnricher]
-    L -->|1. claim key| RL[(ResultLedger)]
-    L -->|2. on lease: call| E[Enricher]
-    E --> T[PromptTemplate<br/>event framed as data]
-    E --> P{{LlmProvider<br/>fake / OpenAI-compatible / Anthropic / Azure}}
-    E --> V[OutputSchema<br/>JSON Schema 2020-12]
-    L -->|3. complete| RL
-    C -->|envelope + offset, same transaction| S[EnrichedRecordSink]
-    C -->|after rollback: unusable answer| R[DeadLetterPublishingRecoverer]
+    CL[ConsumerLoop per consumer<br/>poll thread never blocks<br/>key lanes on virtual threads] --> EP[EnrichmentProcessor<br/>routing]
+    EP --> L[LedgeredEnricher]
+    L -->|1. skip rules| SK{{skipped envelope}}
+    L -->|2. claim key| RL[(ResultLedger)]
+    L -->|3. reserve| B[TenantBudgets]
+    L -->|4. call| R[ResilientLlmProvider<br/>timeout, full-jitter retries]
+    R --> RLP[RateLimitedLlmProvider<br/>RPM/TPM buckets, AIMD on 429]
+    RLP --> P{{LlmProvider<br/>fake / OpenAI-compatible / Anthropic / Azure}}
+    L -->|5. validate, complete| RL
+    CL -->|outputs + offsets,<br/>one transaction per commit interval| OUT
   end
-  RL --- PG[(PostgreSQL<br/>enricher_result_ledger)]
-  IN --> C
-  S --> OUT
-  R --> DLQ
+  RL --- PG[(PostgreSQL<br/>result ledger + budget counters)]
+  B --- PG
+  IN --> CL
+  RT --> CL
+  DF --> CL
+  EP -.retryable.-> RT
+  EP -.over budget, defer.-> DF
+  EP -.unusable.-> DLQ
 ```
 
 How one record flows:
 
-1. The value is parsed and hashed in canonical form. The ledger key is pipeline, prompt version, requested model and that hash.
-2. `claim` returns a stored answer (no model call), a lease (call the model), or "busy" when another worker holds a live lease (wait briefly, then retry the record on a back-off that spans one lease).
-3. A usable answer is stored with `complete` before it is published, in its own database statement. If the Kafka transaction then aborts (crash, rebalance, fenced zombie), the retry is a ledger hit.
-4. The envelope and the input offset commit in one Kafka transaction; `read_committed` consumers never see aborted attempts.
+1. The consumer loop buffers the record and runs it in its lane (its key within its partition by default). Other lanes keep running, and `poll()` keeps being called, however slow the call is.
+2. The value is parsed and hashed in canonical form; the tenant is resolved and skip rules are checked. A matching rule ends here: a skipped envelope, no call.
+3. `claim` on the ledger key (pipeline, prompt version, model, input hash) returns a stored answer (no call, whatever the budget says), a lease, or "busy" (another worker is calling; wait, then retry later).
+4. With a lease, the tenant's budget reserves the worst case. If it does not fit, the record is downgraded to the fallback model (back to step 3 with that model), skipped, or parked on `<input>.enricher-deferred` until the budget window resets.
+5. The provider call goes through the retry layer and, per attempt, the rate limiter. A usable answer is stored in the ledger before it is published, and the reservation is settled to the real usage.
+6. Finished records are written in offset order, and outputs plus offsets commit in one Kafka transaction per commit interval. `read_committed` consumers never see aborted attempts.
 
 | Module | Purpose |
 |---|---|
-| `enricher-core` | Framework-free engine: provider interfaces and fakes, prompt rendering, schema validation, canonical hashing, envelope building, the `ResultLedger` contract with in-memory and no-op ledgers, and `LedgeredEnricher`. |
-| `enricher-ledger-postgres` | `PostgresResultLedger` (leases and stored results shared by all instances) and its Flyway migrations. Optional. |
-| `enricher-spring-boot-starter` | `enricher.*` properties, one Spring Kafka container per pipeline, Kafka transactions when configured, ledger selection, dead-letter routing, optional topic creation. Every bean can be replaced. |
+| `enricher-core` | Framework-free engine: provider interfaces and fakes, retries, rate limiting, prompt rendering, schema validation, canonical hashing, envelopes, the result ledger contract, budgets, skip rules, cost accounting and `LedgeredEnricher`. |
+| `enricher-kafka` | `ConsumerLoop` on plain `kafka-clients`: key lanes, pause/resume backpressure, batched transactions, retry and deferred topics, routing. No Spring dependency. |
+| `enricher-ledger-postgres` | `PostgresResultLedger`, `PostgresBudgetStore` and their Flyway migrations. Optional. |
+| `enricher-spring-boot-starter` | `enricher.*` properties, SpEL skip rules and tenants, ledger and budget store selection, one consumer loop per pipeline consumer, optional topic creation. Every bean can be replaced. |
 | `enricher-app` | Runnable service configured entirely by `application.yml` and environment variables. |
 
 ## Design choices so far
@@ -161,7 +193,11 @@ How one record flows:
 - **Transactions for output, a ledger for cost.** Kafka transactions make the output exactly-once but cannot un-pay an aborted model call; the PostgreSQL ledger stores each paid answer outside the Kafka transaction and leases keys so two workers never call for the same one at once. See [ADR 0002](docs/adr/0002-result-ledger-and-kafka-transactions.md).
 - **Database clock for leases.** Lease expiry is computed with `clock_timestamp()` in PostgreSQL, so instances with skewed clocks agree on when a lease lapses.
 - **Events are untrusted.** `{{event}}` is written as JSON between `<event>` markers with `<` escaped, and single fields are written as JSON literals, so event text cannot close the block or add unquoted lines to the prompt. Day 5 adds PII masking and a written threat model.
-- **Fail at startup, not per record.** Unknown template placeholders, unreadable schemas and pipelines that write to their own input topic stop the application with the pipeline name in the error.
+- **Own consumer loop with key lanes.** A blocking listener cannot keep slow LLM calls from stalling a partition or triggering rebalances, and Spring Kafka's async listeners do not combine with container transactions. See [ADR 0003](docs/adr/0003-own-consumer-loop-with-key-lanes.md).
+- **Cost decisions before the call, in a fixed order.** Skip rules, then the ledger (hits are free even for a tenant out of budget), then a worst-case budget reservation settled to real usage, then the over-budget action. Rate limiting runs per attempt inside the retry layer, so every 429 shrinks the concurrency limit. See [ADR 0004](docs/adr/0004-cost-controls-before-the-call.md).
+- **Budgets that hold across replicas.** A charge is one conditional `INSERT .. ON CONFLICT DO UPDATE .. WHERE` in PostgreSQL, so concurrent instances cannot jointly cross a tenant's cap.
+- **Safe expressions.** Skip rules and tenant expressions run in SpEL's `SimpleEvaluationContext`: field access, comparisons and string methods, but no type references, constructors or bean access.
+- **Fail at startup, not per record.** Unknown template placeholders, unreadable schemas, invalid SpEL, contradicting budget settings and pipelines that write to their own input topic stop the application with the pipeline name in the error.
 
 ## Configuration reference
 
@@ -177,49 +213,130 @@ How one record flows:
 | `enricher.ledger.busy-retry-interval` | `500ms` | Back-off between redeliveries of a record whose key stays busy. |
 | `enricher.ledger.initialize-schema` | `true` | Create or upgrade the ledger table at startup. |
 | `enricher.ledger.owner` | host name | Name stored with leases, for diagnostics. |
-| `enricher.topics.create` | `false` | Create input, output and dead-letter topics at startup. |
+| `enricher.resilience.call-timeout` / `max-attempts` | `30s` / `3` | Per-attempt timeout and attempts per delivery. |
+| `enricher.resilience.initial-backoff` / `max-backoff` | `200ms` / `5s` | Full-jitter back-off between attempts; a provider's `Retry-After` is honoured when longer. |
+| `enricher.rate-limit.requests-per-minute` | `0` (off) | Requests a minute for this instance. With N replicas on one key, about 1/N of the key's quota. |
+| `enricher.rate-limit.tokens-per-minute` | `0` (off) | Input plus output tokens a minute; reserved as prompt estimate plus output cap, settled to real usage. |
+| `enricher.rate-limit.max-wait` | `5s` | Longest an attempt waits to be admitted before it fails as retryable. |
+| `enricher.rate-limit.initial-concurrency` / `min-concurrency` / `max-concurrency` | `16` / `1` / `64` | Adaptive (AIMD) limit on concurrent provider calls. |
+| `enricher.rate-limit.decrease-factor` / `decrease-cooldown` | `0.5` / `1s` | Multiplier applied on a 429, and the minimum spacing between two decreases. |
+| `enricher.pricing.<model>.input-per-million` / `output-per-million` | `0` | USD per million tokens, for cost accounting and cost caps. Put model names with dots or colons in brackets: `enricher.pricing.[llama3.1:8b].input-per-million`. |
+| `enricher.budgets.store` | `auto` | `postgres` when a `DataSource` and `enricher-ledger-postgres` are present (one cap across instances), else `memory` (each instance counts alone). |
+| `enricher.topics.create` | `false` | Create input, retry, deferred, output and dead-letter topics at startup. |
 | `enricher.topics.partitions` / `replication-factor` | `3` / `1` | Settings for created topics. |
 | `enricher.pipelines.<name>.input-topic` | required | Topic to consume. |
 | `enricher.pipelines.<name>.output-topic` | required | Topic for enriched envelopes. |
 | `enricher.pipelines.<name>.dead-letter-topic` | `<input-topic>.enricher-dlq` | Topic for failed records. |
 | `enricher.pipelines.<name>.group-id` | `enricher-<name>` | Consumer group. |
-| `enricher.pipelines.<name>.concurrency` | `1` | Consumer threads. |
+| `enricher.pipelines.<name>.concurrency` | `1` | Consumers (poll loops) in this instance. |
+| `enricher.pipelines.<name>.ordering` | `key` | What runs in sequence: `key` (per key within a partition), `partition`, or `unordered`. |
+| `enricher.pipelines.<name>.max-in-flight` | `16` | Records processed at once per consumer. |
+| `enricher.pipelines.<name>.max-pending-per-partition` | `500` | Uncommitted records buffered per partition before it is paused. |
+| `enricher.pipelines.<name>.commit-interval` | `100ms` | How often finished records commit (one Kafka transaction). |
+| `enricher.pipelines.<name>.retry-delays` | none | Delay of each retry topic `<input>.enricher-retry-N`, e.g. `10s,1m`. |
 | `enricher.pipelines.<name>.prompt-version` | `v1` | Version of prompt plus schema; bump it when either changes meaning. |
 | `enricher.pipelines.<name>.model` | `fake-1` | Model name passed to the provider. |
 | `enricher.pipelines.<name>.system-prompt` | empty | System instructions. |
 | `enricher.pipelines.<name>.user-template` | required | Prompt with `{{event}}`, `{{event.<path>}}`, `{{key}}`, `{{topic}}`. |
 | `enricher.pipelines.<name>.output-schema` | required | JSON Schema resource, e.g. `classpath:` or `file:`. |
-| `enricher.pipelines.<name>.max-output-tokens` | `512` | Output token cap per call. |
+| `enricher.pipelines.<name>.max-output-tokens` | `512` | Output token cap per call; also what budgets and TPM reserve for the answer. |
+| `enricher.pipelines.<name>.tenant` | none (`default`) | SpEL expression for the tenant a record is charged to, e.g. `event.merchantId`. |
+| `enricher.pipelines.<name>.skip.<rule>` | none | SpEL condition; matching records are not sent to the model, e.g. `event.type == 'PING'`. |
+| `enricher.pipelines.<name>.emit-skipped` | `true` | Write a skipped envelope for skipped records; `false` writes nothing. |
+| `enricher.pipelines.<name>.budget.period` | `daily` | Budget window, `daily` or `monthly`, in UTC. |
+| `enricher.pipelines.<name>.budget.max-tokens` / `max-cost-usd` | none | Caps per tenant and window; `-1` or unset means no cap on that dimension. |
+| `enricher.pipelines.<name>.budget.tenants.<tenant>.max-tokens` / `max-cost-usd` | inherit | Caps for one tenant; what it leaves out inherits the pipeline's caps. `0` cuts a tenant off. |
+| `enricher.pipelines.<name>.budget.on-exceeded` | `defer` | `defer` (park on `<input>.enricher-deferred` until the window resets), `skip`, or `downgrade`. |
+| `enricher.pipelines.<name>.budget.fallback-model` | none | Cheaper model for `downgrade`; it has its own ledger entries. |
+| `enricher.pipelines.<name>.budget.after-downgrade` | `defer` | `defer` or `skip`, when even the fallback model does not fit. |
 
-Kafka client settings come from Spring Boot's `spring.kafka.*`, the ledger database from `spring.datasource.*`. The standalone app reads `KAFKA_BOOTSTRAP_SERVERS`, `ENRICHER_TX_ID_PREFIX`, `ENRICHER_DB_URL`, `ENRICHER_DB_USER`, `ENRICHER_DB_PASSWORD`, `ENRICHER_DB_POOL_SIZE`, `ENRICHER_DELIVERY`, `ENRICHER_LEDGER_STORE`, `ENRICHER_LEDGER_LEASE_TTL`, `ENRICHER_LEDGER_INIT_SCHEMA`, `ENRICHER_PROVIDER`, `ENRICHER_CREATE_TOPICS` and `ENRICHER_DISPUTE_MODEL`.
+Kafka client settings come from Spring Boot's `spring.kafka.*`, the ledger database from `spring.datasource.*`. The standalone app reads `KAFKA_BOOTSTRAP_SERVERS`, `ENRICHER_TX_ID_PREFIX`, `ENRICHER_DB_URL`, `ENRICHER_DB_USER`, `ENRICHER_DB_PASSWORD`, `ENRICHER_DB_POOL_SIZE`, `ENRICHER_DELIVERY`, `ENRICHER_LEDGER_STORE`, `ENRICHER_LEDGER_LEASE_TTL`, `ENRICHER_LEDGER_INIT_SCHEMA`, `ENRICHER_PROVIDER`, `ENRICHER_CREATE_TOPICS`, `ENRICHER_DISPUTE_MODEL`, `ENRICHER_CALL_TIMEOUT`, `ENRICHER_MAX_ATTEMPTS`, `ENRICHER_MAX_IN_FLIGHT`, `ENRICHER_RPM`, `ENRICHER_TPM`, `ENRICHER_RATE_LIMIT_MAX_WAIT` and `ENRICHER_MAX_PROVIDER_CONCURRENCY`.
 
-Kafka headers on enriched records: `enricher-pipeline`, `enricher-prompt-version`, `enricher-input-hash`, `enricher-result-source`. On dead-lettered records: `enricher-pipeline`, `enricher-failure-reason` (`INVALID_JSON`, `SCHEMA_VIOLATION`, `PROVIDER_ERROR`, `LEDGER_BUSY`, `PROCESSING_ERROR`), `enricher-failure-detail`.
+Skip rules and tenant expressions see `event` (the parsed value as maps and lists), `key`, `topic`, `partition` and `offset`. Missing fields read as `null`, so guard comparisons: `event.amount != null and event.amount < 5`. They run in SpEL's `SimpleEvaluationContext`: no `T(...)`, no constructors, no bean references. A rule that throws on a record does not skip it; a tenant expression that throws charges the record to `default`.
+
+Kafka headers:
+
+| Record | Headers |
+|---|---|
+| enriched | `enricher-pipeline`, `enricher-prompt-version`, `enricher-input-hash`, `enricher-result-source` (`provider` or `ledger`), `enricher-tenant` |
+| skipped | the same, with `enricher-result-source: none`, plus `enricher-skip-reason` (`rule:<name>` or `over-budget`) |
+| retry / deferred / dead-lettered | `enricher-pipeline`, `enricher-failure-reason` (`INVALID_JSON`, `SCHEMA_VIOLATION`, `PROVIDER_ERROR`, `RETRIES_EXHAUSTED`, `LEDGER_BUSY`, `BUDGET_EXCEEDED`, `PROCESSING_ERROR`), `enricher-failure-detail`, `enricher-attempts`, `enricher-original-topic` / `-partition` / `-offset`; retry and deferred records also `enricher-retry-not-before`, deferred ones `enricher-tenant` |
 
 ## Evaluation
 
-### Exactly-once chaos test (measured in CI)
+All numbers below come from one CI run, [40097250912](https://github.com/xeeshan16/kafka-llm-enricher/actions/runs/40097250912) on GitHub Actions (commit `6bf16b6`, build job; the formatting check of that commit failed and was fixed in the next commit without code changes). Kafka 3.8.0 and PostgreSQL 16 run in Testcontainers, the provider is the deterministic fake, and the data is synthetic disputes. They measure delivery, ledger, budget and rate-limit mechanics, not model quality. The CI job summary prints the raw lines.
 
-`ExactlyOnceChaosIT`, run [39785919072](https://github.com/xeeshan16/kafka-llm-enricher/actions/runs/39785919072) on GitHub Actions: two instances, one consumer group, Kafka 3.8.0 and PostgreSQL 16 in Testcontainers, fake provider, 40 synthetic disputes over 4 partitions. Failures injected: 8 transactions aborted after the result was stored, and one worker hung for 14 s in a provider call (`max.poll.interval.ms` = 6 s), so it was expelled and its partitions moved.
+### Exactly-once chaos test
+
+`ExactlyOnceChaosIT`: two instances in one consumer group, 40 disputes over 4 partitions. Injected: the first commit of every transaction carrying one of 8 chosen disputes throws (the transaction aborts and is replayed), and one provider call hangs for 14 s (more than twice `max.poll.interval.ms`) while a third instance joins and partitions move.
 
 | Metric | Result |
 |---|---|
-| Envelopes seen by a `read_committed` reader | 40 (one per input, 0 dead-lettered) |
-| Records in the output log incl. aborted attempts (`read_uncommitted`) | 49 |
+| Envelopes seen by a `read_committed` reader | 40 (one per input) |
+| Records in the output log incl. aborted attempts (`read_uncommitted`) | 82 |
+| Aborted transactions / partitions revoked / partitions lost | 4 / 12 / 0 |
 | Provider calls | 40 (exactly one per input) |
-| Ledger: completed rows / hits | 40 / 9 (8 crash retries + the zombie's record) |
+| Ledger: completed rows / hits | 40 / 54 |
 
-This measures the delivery and ledger mechanics, not model quality.
+### Concurrency and retry topics
 
-The full eval harness lands on day 7. The eval harness lands on day 7; this section will only ever show numbers from real runs, with the provider and dataset that produced them.
+`ConcurrencyAndRetryIT`: 8 keys x 5 records on one partition, `max-in-flight` 8, one call of 5 s while `max.poll.interval.ms` is 3 s.
+
+| Metric | Result |
+|---|---|
+| Records enriched / wall time | 40 / 7.8 s |
+| Most concurrent calls | 8 |
+| Records of other keys finished while the slow call ran | 35 of 35 |
+| Partitions revoked / lost | 0 / 0 |
+| Per-key output order | input order for all 8 keys |
+
+Routing in the same test: a record failing 4 times with a retryable error recovered through both retry topics (5 calls); one failing forever was dead-lettered as `RETRIES_EXHAUSTED` after 3 stages (6 calls); a 400 went to the DLQ as `PROVIDER_ERROR` and a poison record as `PROCESSING_ERROR` after one call each.
+
+### Budgets, skip rules and free replays
+
+`CostControlIT`, pipeline `costed`, one partition, PostgreSQL budget store. Prices: `fake-1` 10 / 40 USD and `fake-mini` 5 / 20 USD per million input / output tokens (made up for the test). Daily cap 0.012 USD (12,000 micro-USD) per tenant, `globex` uncapped, `on-exceeded: downgrade` to `fake-mini`, then `defer`. Skip rule `event.amount != null and event.amount < 5`. Input: 12 `acme` disputes, 6 `globex`, 6 `initech` (all under 5 USD), then the first 3 `acme` disputes again.
+
+| Tenant | Outcome |
+|---|---|
+| acme | 5 enriched with `fake-1`, 1 downgraded to `fake-mini`, 6 deferred to the next UTC midnight |
+| acme replays | 3 of 3 answered from the ledger (`enricher-result-source: ledger`), although acme was out of budget |
+| globex | 6 of 6 enriched with `fake-1` |
+| initech | 6 of 6 skipped by the rule, 0 provider calls |
+
+| Metric | Result |
+|---|---|
+| acme spend recorded in PostgreSQL | 10,735 of 12,000 micro-USD (never above the cap) |
+| Paid calls / cost | 12 / 22,595 micro-USD |
+| Ledger hits / cost they saved | 3 / 5,830 micro-USD |
+| Records sent to the fallback model's budget check | 7 (1 fitted, 6 deferred) |
+| Duplicate paid calls | 0 |
+
+`PostgresBudgetStoreIT`: 16 threads, each with its own store instance, made 640 charges of 100 tokens against one tenant with a 10,000-token cap. 100 were granted, and the counter ended at exactly 10,000.
+
+### Adaptive concurrency under 429s
+
+`CostControlIT`, pipeline `throttled`: 40 records, `max-in-flight` 16, a provider that answers 429 (with `Retry-After: 100ms`) whenever more than 3 calls run at once. Rate limiter starting at 16 concurrent calls, halving at most every 200 ms.
+
+| Metric | Result |
+|---|---|
+| Records enriched / dead-lettered | 40 / 0 |
+| Wall time | 4.3 s |
+| 429s received / limit decreases | 27 / 7 |
+| Concurrency limit at the end (started at 16) | 4 |
+| Most calls the provider served at once | 3 |
+
+The full eval harness lands on day 7; this section will only ever show numbers from real runs, with the provider and dataset that produced them.
 
 ## Limitations (current)
 
 - One duplicate paid call remains possible per crash: a worker that dies after the model answered but before the answer was stored in the ledger. The next attempt pays again. The output stays exactly-once.
-- Each record is its own Kafka transaction and costs one to three ledger statements; fine next to an LLM call, but throughput tuning (batched transactions) is still to come.
 - Unusable answers are not stored, so replaying a dead-lettered record calls the model again.
-- Stored results are kept until purged (`ResultLedger.purgeCompletedBefore`); there is no scheduled purge yet.
-- Records are processed one at a time per consumer thread; a slow model call holds up its partition. Day 3 adds key-ordered parallelism and pause/resume.
-- Only the fake provider ships today; real providers land on day 5.
+- Stored results and budget counters are kept until purged (`ResultLedger.purgeCompletedBefore`, `PostgresBudgetStore.purgeWindowsBefore`); there is no scheduled purge yet.
+- Output of a partition becomes visible only when every earlier record of that partition has finished, so a stuck call delays the visibility of later results on its partition (not their processing).
+- Rate limits are per instance, not shared across replicas; give each replica its share of the key's quota.
+- Budgets reserve the worst case (prompt estimate plus the output cap), so a tenant is stopped slightly before its cap would really be reached. Token counts of the fake provider are four-characters-per-token estimates.
+- Deferred records wait in the consumer's memory until their budget window resets; a restart reads them again from the deferred topic.
+- Only the fake provider ships today; real providers land on day 5. Metrics export (Micrometer, OpenTelemetry) lands on day 6; until then the counters are available as beans (`UsageAccounting`, `ProviderRateLimiter.stats()`, `PipelineRunner.stats()`).
 
 ## License
 

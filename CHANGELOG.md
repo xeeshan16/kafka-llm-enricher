@@ -7,6 +7,23 @@ All notable changes to this project are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- Provider rate limiting (`enricher.rate-limit.*`): requests-per-minute and tokens-per-minute token
+  buckets plus an AIMD concurrency limit that halves on 429s and honours `Retry-After`.
+  `ProviderRateLimiter`, `RateLimitedLlmProvider` and `LlmThrottledException` for provider adapters.
+- Per-tenant budgets (`enricher.pipelines.<name>.budget.*`): daily or monthly token and USD caps,
+  per-tenant overrides, and `on-exceeded` = `defer` (to `<input>.enricher-deferred` until the
+  window resets), `skip` or `downgrade` (to `fallback-model`, then `after-downgrade`). Worst-case
+  reservations settled to real usage; ledger hits are never charged. See ADR 0004.
+- `PostgresBudgetStore` and migration `V2__tenant_budget_usage.sql`: one cap across instances via a
+  conditional upsert. `enricher.budgets.store` selects PostgreSQL or memory.
+- Skip rules (`skip.<rule>`) and a `tenant` expression per pipeline, in SpEL with a restricted
+  `SimpleEvaluationContext`; skipped records produce a skipped envelope unless `emit-skipped` is
+  off.
+- Cost accounting: `enricher.pricing.<model>.*`, `PriceTable` (micro-USD), and `UsageAccounting`
+  with calls, tokens, cost, ledger hits and cost saved per pipeline, tenant and model.
+- Headers `enricher-tenant` and `enricher-skip-reason`; failure reason `BUDGET_EXCEEDED`;
+  `ResultSource.NONE`.
+- `CostControlIT` and `PostgresBudgetStoreIT`; their measured lines appear in the CI summary.
 - `enricher-kafka` module: `ConsumerLoop`, a poll loop that never blocks on model calls. Records run
   in parallel by lane (per key within a partition by default, `partition` or `unordered`), finished
   prefixes commit together in one Kafka transaction per `commit-interval`, and full partitions are
@@ -41,6 +58,9 @@ All notable changes to this project are documented here. The format follows
   Testcontainers Kafka integration test.
 
 ### Changed
+- `EnrichmentOutcome` gains `Skipped` and `Deferred`; `LedgeredEnricher.Result` carries the tenant.
+- The enricher calls the provider through `ResilientLlmProvider(RateLimitedLlmProvider(provider))`.
+- The ledger lease warning includes rate-limiter waits.
 - The starter runs pipelines on `ConsumerLoop` instead of Spring Kafka listener containers.
   `EnrichedRecordSink`, `EnrichingListener` and the after-rollback wiring are removed; Kafka client
   settings still come from `spring.kafka.*`.

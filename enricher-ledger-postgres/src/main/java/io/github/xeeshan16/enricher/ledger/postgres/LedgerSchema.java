@@ -7,7 +7,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * Creates and upgrades the ledger table with Flyway.
+ * Creates and upgrades the ledger and budget tables with Flyway.
  *
  * <p>The ledger keeps its own migration history table ({@value #HISTORY_TABLE}) and its own
  * migration location ({@value #LOCATION}), so it never interferes with an application's own Flyway
