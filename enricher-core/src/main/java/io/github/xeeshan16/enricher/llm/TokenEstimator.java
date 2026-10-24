@@ -16,4 +16,14 @@ public final class TokenEstimator {
     }
     return (text.length() + 3L) / 4;
   }
+
+  /**
+   * Worst-case usage of a request before it is sent: the estimated prompt tokens plus the full
+   * output cap. Used to reserve rate-limit and budget capacity, then settled against real usage.
+   */
+  public static TokenUsage estimate(LlmRequest request) {
+    return new TokenUsage(
+        estimate(request.systemPrompt()) + estimate(request.userPrompt()),
+        request.maxOutputTokens());
+  }
 }
