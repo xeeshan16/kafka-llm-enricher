@@ -1,6 +1,8 @@
 package io.github.xeeshan16.enricher.spring;
 
+import io.github.xeeshan16.enricher.cost.OverBudgetAction;
 import io.github.xeeshan16.enricher.kafka.EngineSettings;
+import io.github.xeeshan16.enricher.kafka.FailureRecords;
 import io.github.xeeshan16.enricher.kafka.RetryTopics;
 import io.github.xeeshan16.enricher.pipeline.PipelineDefinition;
 import io.github.xeeshan16.enricher.pipeline.PromptTemplate;
@@ -23,9 +25,35 @@ import java.util.Optional;
  */
 public final class PipelineRegistry {
 
-  /** How one pipeline runs: consumer group, consumers, loop settings and retry stages. */
+  /**
+   * How one pipeline runs: consumer group, consumers, loop settings, retry stages, and whether it
+   * writes skipped envelopes and consumes a deferred topic.
+   *
+   * @param deferredTopic the topic over-budget records are parked on, or {@code null} when the
+   *     pipeline never defers
+   */
   public record PipelineRuntime(
-      String groupId, int concurrency, EngineSettings engine, RetryTopics retryTopics) {}
+      String groupId,
+      int concurrency,
+      EngineSettings engine,
+      RetryTopics retryTopics,
+      boolean emitSkipped,
+      String deferredTopic) {
+
+    public PipelineRuntime(
+        String groupId, int concurrency, EngineSettings engine, RetryTopics retryTopics) {
+      this(groupId, concurrency, engine, retryTopics, true, null);
+    }
+
+    /** Input, retry and deferred topics: everything the pipeline's consumers subscribe to. */
+    public List<String> subscriptions() {
+      List<String> all = new ArrayList<>(retryTopics.subscriptions());
+      if (deferredTopic != null) {
+        all.add(deferredTopic);
+      }
+      return all;
+    }
+  }
 
   private final List<PipelineDefinition> pipelines;
   private final Map<String, PipelineRuntime> runtimes;
@@ -71,7 +99,28 @@ public final class PipelineRegistry {
             engine.sendTimeout());
     RetryTopics retryTopics =
         new RetryTopics(p.inputTopic(), p.retryDelays() == null ? List.of() : p.retryDelays());
-    return new PipelineRuntime(groupId, p.concurrency(), settings, retryTopics);
+    validateBudget(p);
+    String deferred =
+        CostPolicies.defers(p) ? FailureRecords.deferredTopic(p.inputTopic()) : null;
+    return new PipelineRuntime(
+        groupId, p.concurrency(), settings, retryTopics, p.emitSkipped(), deferred);
+  }
+
+  private static void validateBudget(EnricherProperties.Pipeline p) {
+    EnricherProperties.Budget b = p.budget();
+    if (b == null) {
+      return;
+    }
+    if (b.onExceeded() == OverBudgetAction.DOWNGRADE
+        && (b.fallbackModel() == null || b.fallbackModel().isBlank())) {
+      throw new IllegalArgumentException("budget.on-exceeded=downgrade needs budget.fallback-model");
+    }
+    if (b.afterDowngrade() == OverBudgetAction.DOWNGRADE) {
+      throw new IllegalArgumentException("budget.after-downgrade must be defer or skip");
+    }
+    if (b.fallbackModel() != null && b.fallbackModel().equals(p.model())) {
+      throw new IllegalArgumentException("budget.fallback-model must differ from model");
+    }
   }
 
   private static PipelineDefinition toDefinition(String name, EnricherProperties.Pipeline p) {

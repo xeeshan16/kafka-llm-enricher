@@ -1,5 +1,10 @@
 package io.github.xeeshan16.enricher.spring;
 
+import io.github.xeeshan16.enricher.cost.BudgetStore;
+import io.github.xeeshan16.enricher.cost.InMemoryBudgetStore;
+import io.github.xeeshan16.enricher.cost.PriceTable;
+import io.github.xeeshan16.enricher.cost.UsageAccounting;
+import io.github.xeeshan16.enricher.cost.UsageMeter;
 import io.github.xeeshan16.enricher.engine.Enricher;
 import io.github.xeeshan16.enricher.engine.LedgeredEnricher;
 import io.github.xeeshan16.enricher.kafka.EnvelopeRecordFactory;
@@ -13,14 +18,19 @@ import io.github.xeeshan16.enricher.llm.EmbeddingProvider;
 import io.github.xeeshan16.enricher.llm.LlmProvider;
 import io.github.xeeshan16.enricher.llm.fake.FakeEmbeddingProvider;
 import io.github.xeeshan16.enricher.llm.fake.FakeLlmProvider;
+import io.github.xeeshan16.enricher.llm.ratelimit.ProviderRateLimiter;
+import io.github.xeeshan16.enricher.llm.ratelimit.RateLimitedLlmProvider;
 import io.github.xeeshan16.enricher.llm.resilience.ResilientLlmProvider;
 import io.github.xeeshan16.enricher.pipeline.PipelineDefinition;
 import java.net.InetAddress;
 import java.net.UnknownHostException;
+import java.time.Clock;
 import java.time.Duration;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Set;
 import javax.sql.DataSource;
 import org.apache.kafka.clients.admin.NewTopic;
@@ -80,15 +90,108 @@ public class EnricherAutoConfiguration {
     return new FakeEmbeddingProvider(256);
   }
 
+  /** Provider quotas and adaptive concurrency from {@code enricher.rate-limit.*}. */
+  @Bean
+  @ConditionalOnMissingBean
+  public ProviderRateLimiter enricherRateLimiter(EnricherProperties properties) {
+    return new ProviderRateLimiter(limits(properties.rateLimit()));
+  }
+
+  static ProviderRateLimiter.Limits limits(EnricherProperties.RateLimit r) {
+    return new ProviderRateLimiter.Limits(
+        r.requestsPerMinute(),
+        r.tokensPerMinute(),
+        r.maxWait(),
+        r.initialConcurrency(),
+        r.minConcurrency(),
+        r.maxConcurrency(),
+        r.decreaseFactor(),
+        r.decreaseCooldown());
+  }
+
+  /** Model prices from {@code enricher.pricing.*}. */
+  @Bean
+  @ConditionalOnMissingBean
+  public PriceTable enricherPriceTable(EnricherProperties properties) {
+    Map<String, PriceTable.Price> prices = new LinkedHashMap<>();
+    properties
+        .pricing()
+        .forEach(
+            (model, price) ->
+                prices.put(
+                    model,
+                    new PriceTable.Price(price.inputPerMillion(), price.outputPerMillion())));
+    return new PriceTable(prices);
+  }
+
+  /** Token, cost and savings totals; replace it by defining your own {@link UsageMeter}. */
+  @Bean
+  @ConditionalOnMissingBean(UsageMeter.class)
+  public UsageAccounting enricherUsageAccounting(PriceTable prices) {
+    return new UsageAccounting(prices);
+  }
+
   /**
-   * The enricher, calling the provider through {@link ResilientLlmProvider} (per-call timeout and
-   * full-jitter retries from {@code enricher.resilience.*}). The {@code LlmProvider} bean itself
-   * stays unwrapped.
+   * The enricher. Each provider call goes through {@link ResilientLlmProvider} (per-call timeout
+   * and full-jitter retries from {@code enricher.resilience.*}) and, inside it, {@link
+   * RateLimitedLlmProvider}, so every attempt is admitted by the rate limiter and every 429 feeds
+   * the adaptive concurrency limit. The {@code LlmProvider} bean itself stays unwrapped.
    */
   @Bean
   @ConditionalOnMissingBean
-  public Enricher enricher(LlmProvider provider, EnricherProperties properties) {
-    return new Enricher(new ResilientLlmProvider(provider, policy(properties.resilience())));
+  public Enricher enricher(
+      LlmProvider provider, EnricherProperties properties, ProviderRateLimiter rateLimiter) {
+    return new Enricher(
+        new ResilientLlmProvider(
+            new RateLimitedLlmProvider(provider, rateLimiter), policy(properties.resilience())));
+  }
+
+  /**
+   * Tenant budget counters: PostgreSQL when a {@code DataSource} and {@code
+   * enricher-ledger-postgres} are present (one cap across all instances), otherwise memory.
+   */
+  @Bean
+  @ConditionalOnMissingBean
+  public BudgetStore enricherBudgetStore(
+      EnricherProperties properties, ObjectProvider<DataSource> dataSources) {
+    boolean postgresModule =
+        ClassUtils.isPresent(PostgresLedgerSupport.LEDGER_CLASS, getClass().getClassLoader());
+    DataSource dataSource = dataSources.getIfUnique();
+    EnricherProperties.BudgetStoreKind kind = properties.budgets().store();
+    if (kind == EnricherProperties.BudgetStoreKind.AUTO) {
+      kind =
+          postgresModule && dataSource != null
+              ? EnricherProperties.BudgetStoreKind.POSTGRES
+              : EnricherProperties.BudgetStoreKind.MEMORY;
+    }
+    boolean budgeted =
+        properties.pipelines().values().stream().anyMatch(CostPolicies::hasBudget);
+    if (kind == EnricherProperties.BudgetStoreKind.POSTGRES) {
+      if (!postgresModule || dataSource == null) {
+        throw new IllegalStateException(
+            "enricher.budgets.store=postgres needs the enricher-ledger-postgres module and a single"
+                + " DataSource");
+      }
+      if (budgeted) {
+        log.info("tenant budgets: postgres");
+      }
+      return PostgresLedgerSupport.createBudgetStore(
+          dataSource, budgeted && properties.ledger().initializeSchema());
+    }
+    if (budgeted) {
+      log.info(
+          "tenant budgets: memory (each instance counts on its own; use PostgreSQL for one cap"
+              + " across instances)");
+    }
+    return new InMemoryBudgetStore();
+  }
+
+  /** Skip rules, tenants and budgets of every pipeline. */
+  @Bean
+  @ConditionalOnMissingBean
+  public CostPolicies enricherCostPolicies(
+      EnricherProperties properties, BudgetStore budgetStore, PriceTable prices) {
+    return CostPolicies.from(properties, budgetStore, prices, Clock.systemUTC());
   }
 
   static ResilientLlmProvider.Policy policy(EnricherProperties.Resilience resilience) {
@@ -160,9 +263,12 @@ public class EnricherAutoConfiguration {
   @Bean
   @ConditionalOnMissingBean
   public LedgeredEnricher enricherLedgeredEnricher(
-      Enricher enricher, ResultLedger ledger, EnricherProperties properties) {
+      Enricher enricher,
+      ResultLedger ledger,
+      EnricherProperties properties,
+      ObjectProvider<UsageMeter> meters) {
     EnricherProperties.Ledger l = properties.ledger();
-    Duration worstCall = policy(properties.resilience()).worstCase();
+    Duration worstCall = worstCall(properties);
     if (l.leaseTtl().compareTo(worstCall) < 0) {
       log.warn(
           "enricher.ledger.lease-ttl ({}) is shorter than the worst-case provider call with retries"
@@ -173,7 +279,23 @@ public class EnricherAutoConfiguration {
     return new LedgeredEnricher(
         enricher,
         ledger,
-        new LedgeredEnricher.Settings(l.leaseTtl(), l.busyWait(), l.pollInterval()));
+        new LedgeredEnricher.Settings(l.leaseTtl(), l.busyWait(), l.pollInterval()),
+        meters.getIfUnique(() -> UsageMeter.NOOP));
+  }
+
+  /**
+   * Longest one provider call can take inside a ledger lease: every attempt may wait up to the
+   * rate limiter's {@code max-wait} to be admitted, then run up to its timeout, with back-off waits
+   * between attempts.
+   */
+  static Duration worstCall(EnricherProperties properties) {
+    return policy(properties.resilience())
+        .worstCase()
+        .plus(
+            properties
+                .rateLimit()
+                .maxWait()
+                .multipliedBy(Math.max(1, properties.resilience().maxAttempts())));
   }
 
   @Bean
@@ -208,7 +330,8 @@ public class EnricherAutoConfiguration {
       LedgeredEnricher enricher,
       KafkaClientFactory clients,
       OutputRecordFactory outputs,
-      ProducerFactory<?, ?> producerFactory) {
+      ProducerFactory<?, ?> producerFactory,
+      CostPolicies costPolicies) {
     String transactionIdPrefix =
         exactlyOnce(properties.delivery(), producerFactory)
             ? producerFactory.getTransactionIdPrefix()
@@ -221,7 +344,8 @@ public class EnricherAutoConfiguration {
         transactionIdPrefix,
         properties.ledger().busyRetryInterval(),
         busyBudget(properties.ledger()),
-        properties.autoStartup());
+        properties.autoStartup(),
+        costPolicies);
   }
 
   /** Resolves the delivery mode: whether the loops use Kafka transactions. */
@@ -258,14 +382,18 @@ public class EnricherAutoConfiguration {
   }
 
   /**
-   * Input, retry, output and dead-letter topics of every pipeline, each once, in declaration order.
+   * Input, retry, deferred, output and dead-letter topics of every pipeline, each once, in declaration order.
    */
   static List<NewTopic> topicsToCreate(
       PipelineRegistry registry, EnricherProperties.Topics topics) {
     Set<String> names = new LinkedHashSet<>();
     for (PipelineDefinition pipeline : registry.pipelines()) {
       names.add(pipeline.inputTopic());
-      names.addAll(registry.runtime(pipeline.name()).retryTopics().topics());
+      PipelineRegistry.PipelineRuntime runtime = registry.runtime(pipeline.name());
+      names.addAll(runtime.retryTopics().topics());
+      if (runtime.deferredTopic() != null) {
+        names.add(runtime.deferredTopic());
+      }
       names.add(pipeline.outputTopic());
       names.add(pipeline.deadLetterTopic());
     }

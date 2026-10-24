@@ -2,6 +2,16 @@ package io.github.xeeshan16.enricher.spring;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import io.github.xeeshan16.enricher.cost.BudgetLimit;
+import io.github.xeeshan16.enricher.cost.BudgetPeriod;
+import io.github.xeeshan16.enricher.cost.BudgetStore;
+import io.github.xeeshan16.enricher.cost.CostPolicy;
+import io.github.xeeshan16.enricher.cost.InMemoryBudgetStore;
+import io.github.xeeshan16.enricher.cost.OverBudgetAction;
+import io.github.xeeshan16.enricher.cost.PriceTable;
+import io.github.xeeshan16.enricher.cost.SkipRule;
+import io.github.xeeshan16.enricher.cost.TenantBudgets;
+import io.github.xeeshan16.enricher.cost.UsageAccounting;
 import io.github.xeeshan16.enricher.engine.Enricher;
 import io.github.xeeshan16.enricher.engine.LedgeredEnricher;
 import io.github.xeeshan16.enricher.kafka.OrderingMode;
@@ -9,7 +19,10 @@ import io.github.xeeshan16.enricher.ledger.InMemoryResultLedger;
 import io.github.xeeshan16.enricher.ledger.NoopResultLedger;
 import io.github.xeeshan16.enricher.ledger.ResultLedger;
 import io.github.xeeshan16.enricher.llm.LlmProvider;
+import io.github.xeeshan16.enricher.llm.TokenUsage;
 import io.github.xeeshan16.enricher.llm.fake.FakeLlmProvider;
+import io.github.xeeshan16.enricher.llm.ratelimit.ProviderRateLimiter;
+import io.github.xeeshan16.enricher.llm.ratelimit.RateLimitedLlmProvider;
 import io.github.xeeshan16.enricher.llm.resilience.ResilientLlmProvider;
 import io.github.xeeshan16.enricher.pipeline.PipelineDefinition;
 import java.time.Duration;
@@ -66,9 +79,28 @@ class EnricherAutoConfigurationTest {
               .isInstanceOfSatisfying(
                   ResilientLlmProvider.class,
                   r -> {
-                    assertThat(r.delegate()).isSameAs(context.getBean(LlmProvider.class));
+                    assertThat(r.delegate())
+                        .isInstanceOfSatisfying(
+                            RateLimitedLlmProvider.class,
+                            limited -> {
+                              assertThat(limited.delegate())
+                                  .isSameAs(context.getBean(LlmProvider.class));
+                              assertThat(limited.limiter())
+                                  .isSameAs(context.getBean(ProviderRateLimiter.class));
+                            });
                     assertThat(r.policy()).isEqualTo(ResilientLlmProvider.Policy.defaults());
                   });
+          // No cost controls unless configured.
+          assertThat(runtime.deferredTopic()).isNull();
+          assertThat(runtime.emitSkipped()).isTrue();
+          CostPolicy policy = context.getBean(CostPolicies.class).policy("triage");
+          assertThat(policy.skipRules()).isEmpty();
+          assertThat(policy.budgets()).isNull();
+          assertThat(context.getBean(ProviderRateLimiter.class).limits())
+              .isEqualTo(ProviderRateLimiter.Limits.defaults());
+          assertThat(context.getBean(LedgeredEnricher.class).meter())
+              .isSameAs(context.getBean(UsageAccounting.class));
+          assertThat(context.getBean(BudgetStore.class)).isInstanceOf(InMemoryBudgetStore.class);
         });
   }
 
@@ -244,6 +276,135 @@ class EnricherAutoConfigurationTest {
                         "in.enricher-retry-2",
                         "out",
                         "in.enricher-dlq"));
+  }
+
+  @Test
+  void bindsRateLimitPricingSkipRulesTenantAndBudget() {
+    runner
+        .withPropertyValues(
+            "enricher.rate-limit.requests-per-minute=600",
+            "enricher.rate-limit.tokens-per-minute=200000",
+            "enricher.rate-limit.max-wait=2s",
+            "enricher.rate-limit.initial-concurrency=8",
+            "enricher.rate-limit.max-concurrency=32",
+            "enricher.pricing.[gpt-4o].input-per-million=2.50",
+            "enricher.pricing.[gpt-4o].output-per-million=10",
+            "enricher.pricing.[llama3.1-8b].input-per-million=0",
+            "enricher.pipelines.triage.model=gpt-4o",
+            "enricher.pipelines.triage.tenant=event.merchantId",
+            "enricher.pipelines.triage.skip.small-refund=event.amount != null and event.amount < 5",
+            "enricher.pipelines.triage.skip.pings=event.type == 'PING'",
+            "enricher.pipelines.triage.emit-skipped=false",
+            "enricher.pipelines.triage.budget.period=monthly",
+            "enricher.pipelines.triage.budget.max-cost-usd=25",
+            "enricher.pipelines.triage.budget.tenants.acme.max-tokens=1000",
+            "enricher.pipelines.triage.budget.on-exceeded=downgrade",
+            "enricher.pipelines.triage.budget.fallback-model=llama3.1-8b",
+            "enricher.pipelines.triage.budget.after-downgrade=defer")
+        .run(
+            context -> {
+              assertThat(context).hasNotFailed();
+              assertThat(context.getBean(ProviderRateLimiter.class).limits())
+                  .isEqualTo(
+                      new ProviderRateLimiter.Limits(
+                          600, 200_000, Duration.ofSeconds(2), 8, 1, 32, 0.5, Duration.ofSeconds(1)));
+              PriceTable prices = context.getBean(PriceTable.class);
+              assertThat(prices.costMicros("gpt-4o", new TokenUsage(1000, 100))).isEqualTo(3500);
+              assertThat(prices.knows("llama3.1-8b")).isTrue();
+
+              CostPolicy policy = context.getBean(CostPolicies.class).policy("triage");
+              assertThat(policy.skipRules())
+                  .extracting(SkipRule::name)
+                  .containsExactly("small-refund", "pings");
+              assertThat(policy.onExceeded()).isEqualTo(OverBudgetAction.DOWNGRADE);
+              assertThat(policy.fallbackModel()).isEqualTo("llama3.1-8b");
+              assertThat(policy.defers()).isTrue();
+              TenantBudgets budgets = (TenantBudgets) policy.budgets();
+              assertThat(budgets.period()).isEqualTo(BudgetPeriod.MONTHLY);
+              assertThat(budgets.limitFor("someone")).isEqualTo(new BudgetLimit(-1, 25_000_000));
+              // A tenant entry overrides what it sets and inherits the rest.
+              assertThat(budgets.limitFor("acme")).isEqualTo(new BudgetLimit(1000, 25_000_000));
+
+              PipelineRegistry.PipelineRuntime runtime =
+                  context.getBean(PipelineRegistry.class).runtime("triage");
+              assertThat(runtime.emitSkipped()).isFalse();
+              assertThat(runtime.deferredTopic()).isEqualTo("in.enricher-deferred");
+              assertThat(runtime.subscriptions()).containsExactly("in", "in.enricher-deferred");
+            });
+  }
+
+  @Test
+  void skipOnExceededDoesNotSubscribeToADeferredTopic() {
+    runner
+        .withPropertyValues(
+            "enricher.pipelines.triage.budget.max-tokens=1000",
+            "enricher.pipelines.triage.budget.on-exceeded=skip",
+            "enricher.topics.create=true",
+            "spring.kafka.admin.auto-create=false")
+        .run(
+            context -> {
+              assertThat(context).hasNotFailed();
+              assertThat(context.getBean(PipelineRegistry.class).runtime("triage").deferredTopic())
+                  .isNull();
+              assertThat(context.getBean(CostPolicies.class).policy("triage").defers()).isFalse();
+            });
+  }
+
+  @Test
+  void createsTheDeferredTopicWhenTheBudgetDefers() {
+    runner
+        .withPropertyValues(
+            "enricher.pipelines.triage.budget.max-tokens=1000",
+            "enricher.topics.create=true",
+            "spring.kafka.admin.auto-create=false")
+        .run(
+            context ->
+                assertThat(
+                        EnricherAutoConfiguration.topicsToCreate(
+                            context.getBean(PipelineRegistry.class),
+                            context.getBean(EnricherProperties.class).topics()))
+                    .extracting(t -> t.name())
+                    .containsExactly("in", "in.enricher-deferred", "out", "in.enricher-dlq"));
+  }
+
+  @Test
+  void downgradeWithoutFallbackModelFailsStartup() {
+    runner
+        .withPropertyValues(
+            "enricher.pipelines.triage.budget.max-tokens=1000",
+            "enricher.pipelines.triage.budget.on-exceeded=downgrade")
+        .run(
+            context ->
+                assertThat(context)
+                    .hasFailed()
+                    .getFailure()
+                    .hasStackTraceContaining("enricher.pipelines.triage")
+                    .hasStackTraceContaining("fallback-model"));
+  }
+
+  @Test
+  void invalidSkipExpressionFailsStartup() {
+    runner
+        .withPropertyValues("enricher.pipelines.triage.skip.broken=event.amount <")
+        .run(
+            context ->
+                assertThat(context)
+                    .hasFailed()
+                    .getFailure()
+                    .hasStackTraceContaining("enricher.pipelines.triage")
+                    .hasStackTraceContaining("skip rule 'broken'"));
+  }
+
+  @Test
+  void worstCallIncludesRateLimiterWaits() {
+    runner.run(
+        context -> {
+          EnricherProperties properties = context.getBean(EnricherProperties.class);
+          // 3 attempts x (30 s timeout + 5 s admission wait) + 2 x 5 s back-off = 115 s, under the
+          // default 2 minute lease.
+          assertThat(EnricherAutoConfiguration.worstCall(properties))
+              .isEqualTo(Duration.ofSeconds(115));
+        });
   }
 
   @Test

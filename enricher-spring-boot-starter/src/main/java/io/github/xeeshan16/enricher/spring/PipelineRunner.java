@@ -42,6 +42,7 @@ public final class PipelineRunner implements SmartLifecycle {
   private final Duration busyRetryInterval;
   private final Duration busyBudget;
   private final boolean autoStartup;
+  private final CostPolicies costPolicies;
   private final String instanceTag = UUID.randomUUID().toString().substring(0, 8);
   private final Map<ConsumerLoop, String> loops = new LinkedHashMap<>();
   private final List<Thread> threads = new ArrayList<>();
@@ -62,6 +63,32 @@ public final class PipelineRunner implements SmartLifecycle {
       Duration busyRetryInterval,
       Duration busyBudget,
       boolean autoStartup) {
+    this(
+        registry,
+        enricher,
+        clients,
+        outputs,
+        transactionIdPrefix,
+        busyRetryInterval,
+        busyBudget,
+        autoStartup,
+        CostPolicies.none());
+  }
+
+  /**
+   * @param costPolicies skip rules, tenants and budgets per pipeline
+   */
+  public PipelineRunner(
+      PipelineRegistry registry,
+      LedgeredEnricher enricher,
+      KafkaClientFactory clients,
+      OutputRecordFactory outputs,
+      String transactionIdPrefix,
+      Duration busyRetryInterval,
+      Duration busyBudget,
+      boolean autoStartup,
+      CostPolicies costPolicies) {
+    this.costPolicies = costPolicies;
     this.registry = registry;
     this.enricher = enricher;
     this.clients = clients;
@@ -89,7 +116,16 @@ public final class PipelineRunner implements SmartLifecycle {
       PipelineRegistry.PipelineRuntime runtime = registry.runtime(pipeline.name());
       EnrichmentProcessor processor =
           new EnrichmentProcessor(
-              pipeline, enricher, runtime.retryTopics(), outputs, busyRetryInterval, busyBudget);
+              pipeline,
+              enricher,
+              runtime.retryTopics(),
+              outputs,
+              busyRetryInterval,
+              busyBudget,
+              Clock.systemUTC(),
+              d -> Thread.sleep(d.toMillis()),
+              costPolicies.policy(pipeline.name()),
+              runtime.emitSkipped());
       for (int i = 0; i < runtime.concurrency(); i++) {
         String name = "enricher-" + pipeline.name() + "-" + i;
         String transactionalId =
@@ -97,7 +133,7 @@ public final class PipelineRunner implements SmartLifecycle {
         ConsumerLoop loop =
             new ConsumerLoop(
                 name + "-" + instanceTag,
-                runtime.retryTopics().subscriptions(),
+                runtime.subscriptions(),
                 runtime.groupId(),
                 transactionalId,
                 clients,
@@ -108,13 +144,14 @@ public final class PipelineRunner implements SmartLifecycle {
         threads.add(Thread.ofPlatform().name(name).start(loop));
       }
       log.info(
-          "pipeline={} consuming {} -> {} (dlq {}, retry {}, group {}, consumers {}, ordering {},"
-              + " max in flight {}, promptVersion {}, model {}, delivery {})",
+          "pipeline={} consuming {} -> {} (dlq {}, retry {}, deferred {}, group {}, consumers {},"
+              + " ordering {}, max in flight {}, promptVersion {}, model {}, delivery {})",
           pipeline.name(),
           pipeline.inputTopic(),
           pipeline.outputTopic(),
           pipeline.deadLetterTopic(),
           runtime.retryTopics().delays(),
+          runtime.deferredTopic() == null ? "off" : runtime.deferredTopic(),
           runtime.groupId(),
           runtime.concurrency(),
           runtime.engine().ordering(),

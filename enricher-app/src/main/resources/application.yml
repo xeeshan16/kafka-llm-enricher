@@ -37,6 +37,19 @@ enricher:
     max-attempts: ${ENRICHER_MAX_ATTEMPTS:3}
     initial-backoff: 200ms
     max-backoff: 5s
+  # Provider quotas, enforced per instance before every call (0 = no limit). With N replicas on
+  # one API key, give each about 1/N of the key's quota. Concurrency adapts to 429s (AIMD).
+  rate-limit:
+    requests-per-minute: ${ENRICHER_RPM:0}
+    tokens-per-minute: ${ENRICHER_TPM:0}
+    max-wait: ${ENRICHER_RATE_LIMIT_MAX_WAIT:5s}
+    initial-concurrency: 16
+    max-concurrency: ${ENRICHER_MAX_PROVIDER_CONCURRENCY:64}
+  # USD per million tokens, for cost metrics and cost budgets. The fake provider is free.
+  pricing:
+    fake-1:
+      input-per-million: 0
+      output-per-million: 0
   ledger:
     store: ${ENRICHER_LEDGER_STORE:auto}
     lease-ttl: ${ENRICHER_LEDGER_LEASE_TTL:2m}
@@ -61,6 +74,16 @@ enricher:
       # payments.disputes.enricher-retry-1 (after 10 s), then -2 (after 1 min), then the DLQ.
       retry-delays: 10s,1m
       max-output-tokens: 256
+      # Spend is accounted per merchant. To cap it, add for example:
+      #   skip:
+      #     tiny-amount: "event.amount != null and event.amount < 1"
+      #   budget:
+      #     period: daily
+      #     max-cost-usd: 50
+      #     on-exceeded: downgrade      # or defer / skip
+      #     fallback-model: gpt-4o-mini
+      #     after-downgrade: defer
+      tenant: event.merchant
       output-schema: classpath:schemas/dispute-triage.v1.json
       system-prompt: |
         You triage card payment disputes for a payments operations team.

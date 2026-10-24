@@ -69,7 +69,7 @@ jobs:
               awk -F, -v m="${csv%%/*}" 'NR>1 {c+=$9; x+=$8} END {if (c+x>0) printf "| %s | %d | %d | %.1f |\n", m, c, x, 100*c/(c+x)}' "$csv"
             done
           } >> "$GITHUB_STEP_SUMMARY"
-      - name: Chaos, concurrency and sample output summary
+      - name: Chaos, concurrency, cost and sample output summary
         if: always()
         run: |
           # Printed to the log as well as the summary, so results can be quoted from a real run.
@@ -77,6 +77,8 @@ jobs:
           chaos=$reports/io.github.xeeshan16.enricher.chaos.ExactlyOnceChaosIT-output.txt
           sample=$reports/io.github.xeeshan16.enricher.app.DisputeTriagePipelineIT-output.txt
           engine=$reports/io.github.xeeshan16.enricher.engine.ConcurrencyAndRetryIT-output.txt
+          cost=$reports/io.github.xeeshan16.enricher.engine.CostControlIT-output.txt
+          budget=enricher-ledger-postgres/target/failsafe-reports/io.github.xeeshan16.enricher.ledger.postgres.PostgresBudgetStoreIT-output.txt
           {
             if [ -f "$chaos" ]; then
               echo "### Exactly-once chaos test"
@@ -88,6 +90,13 @@ jobs:
               echo "### Concurrency, retry topics and dead-lettering"
               echo '```'
               grep -E "(concurrency|routing): " "$engine" | sed -E 's/.*((concurrency|routing): )/\1/'
+              echo '```'
+            fi
+            if [ -f "$cost" ] || [ -f "$budget" ]; then
+              echo "### Budgets, skip rules and adaptive concurrency"
+              echo '```'
+              [ -f "$cost" ] && grep -E "(cost|ratelimit): " "$cost" | sed -E 's/.*((cost|ratelimit): )/\1/'
+              [ -f "$budget" ] && grep -E "^budget: " "$budget"
               echo '```'
             fi
             if [ -f "$sample" ]; then

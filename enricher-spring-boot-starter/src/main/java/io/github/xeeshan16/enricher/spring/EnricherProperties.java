@@ -1,6 +1,9 @@
 package io.github.xeeshan16.enricher.spring;
 
+import io.github.xeeshan16.enricher.cost.BudgetPeriod;
+import io.github.xeeshan16.enricher.cost.OverBudgetAction;
 import io.github.xeeshan16.enricher.kafka.OrderingMode;
+import java.math.BigDecimal;
 import java.time.Duration;
 import java.util.Collections;
 import java.util.LinkedHashMap;
@@ -17,6 +20,9 @@ import org.springframework.core.io.Resource;
  * @param provider LLM provider to use when the application defines no {@code LlmProvider} bean
  * @param delivery delivery guarantee towards the output topic
  * @param resilience timeout and in-place retries of each provider call
+ * @param rateLimit provider quotas and adaptive concurrency
+ * @param pricing USD per million tokens by model name, for cost accounting and cost budgets
+ * @param budgets where tenant budget counters are kept
  * @param engine settings shared by every pipeline's consumer loops
  * @param ledger the result ledger that stops duplicate paid calls
  * @param topics optional creation of the topics the pipelines use
@@ -28,6 +34,9 @@ public record EnricherProperties(
     @DefaultValue("fake") String provider,
     @DefaultValue("auto") Delivery delivery,
     @DefaultValue Resilience resilience,
+    @DefaultValue RateLimit rateLimit,
+    Map<String, ModelPrice> pricing,
+    @DefaultValue Budgets budgets,
     @DefaultValue Engine engine,
     @DefaultValue Ledger ledger,
     @DefaultValue Topics topics,
@@ -40,6 +49,13 @@ public record EnricherProperties(
             ? new Resilience(
                 Duration.ofSeconds(30), 3, Duration.ofMillis(200), Duration.ofSeconds(5))
             : resilience;
+    rateLimit =
+        rateLimit == null
+            ? new RateLimit(0, 0, Duration.ofSeconds(5), 16, 1, 64, 0.5, Duration.ofSeconds(1))
+            : rateLimit;
+    pricing =
+        pricing == null ? Map.of() : Collections.unmodifiableMap(new LinkedHashMap<>(pricing));
+    budgets = budgets == null ? new Budgets(BudgetStoreKind.AUTO) : budgets;
     engine =
         engine == null
             ? new Engine(Duration.ofMillis(100), Duration.ofSeconds(10), Duration.ofSeconds(30))
@@ -88,6 +104,95 @@ public record EnricherProperties(
       @DefaultValue("3") int maxAttempts,
       @DefaultValue("200ms") Duration initialBackoff,
       @DefaultValue("5s") Duration maxBackoff) {}
+
+  /**
+   * Quotas of the provider, enforced in this process before each call (retries included). With N
+   * replicas sharing one API key, give each about 1/N of the key's quota.
+   *
+   * @param requestsPerMinute requests a minute; {@code 0} for no limit
+   * @param tokensPerMinute input plus output tokens a minute (estimated before the call, settled
+   *     after); {@code 0} for no limit
+   * @param maxWait longest a call waits to be admitted before it fails as retryable
+   * @param initialConcurrency concurrent provider calls allowed at start
+   * @param minConcurrency floor of the adaptive limit
+   * @param maxConcurrency ceiling of the adaptive limit
+   * @param decreaseFactor multiplier applied to the limit on each provider 429
+   * @param decreaseCooldown minimum spacing between two decreases
+   */
+  public record RateLimit(
+      @DefaultValue("0") int requestsPerMinute,
+      @DefaultValue("0") long tokensPerMinute,
+      @DefaultValue("5s") Duration maxWait,
+      @DefaultValue("16") int initialConcurrency,
+      @DefaultValue("1") int minConcurrency,
+      @DefaultValue("64") int maxConcurrency,
+      @DefaultValue("0.5") double decreaseFactor,
+      @DefaultValue("1s") Duration decreaseCooldown) {}
+
+  /**
+   * Price of one model. Map keys are the model names pipelines use; put names with dots or colons
+   * in brackets, for example {@code enricher.pricing.[llama3.1:8b].input-per-million}.
+   *
+   * @param inputPerMillion USD per million input tokens
+   * @param outputPerMillion USD per million output tokens
+   */
+  public record ModelPrice(
+      @DefaultValue("0") BigDecimal inputPerMillion,
+      @DefaultValue("0") BigDecimal outputPerMillion) {}
+
+  /** Where tenant budget counters live. */
+  public enum BudgetStoreKind {
+    /** PostgreSQL when a {@code DataSource} and the PostgreSQL module are present, else memory. */
+    AUTO,
+    /** PostgreSQL: one cap across every instance. */
+    POSTGRES,
+    /** Process memory: each instance counts on its own. */
+    MEMORY
+  }
+
+  /**
+   * Tenant budget storage, shared by every pipeline with a {@code budget} block.
+   *
+   * @param store where counters are kept
+   */
+  public record Budgets(@DefaultValue("auto") BudgetStoreKind store) {}
+
+  /**
+   * A pipeline's per-tenant budget. Caps of {@code -1} (or left out) mean no cap on that dimension.
+   *
+   * @param period window the caps apply to: {@code daily} or {@code monthly}, in UTC
+   * @param maxTokens input plus output tokens per tenant and window
+   * @param maxCostUsd cost per tenant and window, priced with {@code enricher.pricing}
+   * @param tenants caps for specific tenants; a dimension a tenant leaves out inherits the default
+   * @param onExceeded {@code defer}, {@code skip} or {@code downgrade}
+   * @param fallbackModel the cheaper model used by {@code downgrade}
+   * @param afterDowngrade {@code defer} or {@code skip}, when even the fallback model does not fit
+   */
+  public record Budget(
+      @DefaultValue("daily") BudgetPeriod period,
+      Long maxTokens,
+      BigDecimal maxCostUsd,
+      Map<String, TenantBudget> tenants,
+      @DefaultValue("defer") OverBudgetAction onExceeded,
+      String fallbackModel,
+      @DefaultValue("defer") OverBudgetAction afterDowngrade) {
+
+    public Budget {
+      tenants =
+          tenants == null ? Map.of() : Collections.unmodifiableMap(new LinkedHashMap<>(tenants));
+      onExceeded = onExceeded == null ? OverBudgetAction.DEFER : onExceeded;
+      afterDowngrade = afterDowngrade == null ? OverBudgetAction.DEFER : afterDowngrade;
+      period = period == null ? BudgetPeriod.DAILY : period;
+    }
+  }
+
+  /**
+   * Caps of one tenant.
+   *
+   * @param maxTokens tokens per window; inherits the pipeline default when left out
+   * @param maxCostUsd cost per window; inherits the pipeline default when left out
+   */
+  public record TenantBudget(Long maxTokens, BigDecimal maxCostUsd) {}
 
   /**
    * Consumer loop settings shared by every pipeline.
@@ -172,6 +277,14 @@ public record EnricherProperties(
    * @param outputSchema JSON Schema resource the answer must satisfy, for example {@code
    *     classpath:schemas/dispute-triage.v1.json} (required)
    * @param maxOutputTokens output token cap per call
+   * @param tenant SpEL expression giving the tenant a record is charged to, for example {@code
+   *     event.merchantId}; records without one, or pipelines without the setting, use {@code
+   *     default}
+   * @param skip skip rules by name: SpEL conditions under which a record is not sent to the model,
+   *     for example {@code event.amount != null and event.amount < 5}
+   * @param emitSkipped write a skipped envelope ({@code "enrichment": null}) for skipped records, so
+   *     the output topic keeps one record per input; {@code false} writes nothing
+   * @param budget per-tenant token and cost caps; none when left out
    */
   public record Pipeline(
       String inputTopic,
@@ -189,5 +302,14 @@ public record EnricherProperties(
       String systemPrompt,
       String userTemplate,
       Resource outputSchema,
-      @DefaultValue("512") int maxOutputTokens) {}
+      @DefaultValue("512") int maxOutputTokens,
+      String tenant,
+      Map<String, String> skip,
+      @DefaultValue("true") boolean emitSkipped,
+      Budget budget) {
+
+    public Pipeline {
+      skip = skip == null ? Map.of() : Collections.unmodifiableMap(new LinkedHashMap<>(skip));
+    }
+  }
 }
