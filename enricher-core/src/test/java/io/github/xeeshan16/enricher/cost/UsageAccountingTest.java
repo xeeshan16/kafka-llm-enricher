@@ -33,8 +33,8 @@ class UsageAccountingTest {
     assertThat(total.skipped()).isEqualTo(3);
     assertThat(total.deferred()).isEqualTo(1);
     assertThat(total.downgraded()).isEqualTo(1);
-    assertThat(usage.skipReasons("p")).containsExactly(
-        Map.entry("over-budget", 1L), Map.entry("rule:small-refund", 2L));
+    assertThat(usage.skipReasons("p"))
+        .containsExactly(Map.entry("over-budget", 1L), Map.entry("rule:small-refund", 2L));
     assertThat(usage.snapshot()).extracting(UsageAccounting.Line::tenant).contains("a", "b");
   }
 }

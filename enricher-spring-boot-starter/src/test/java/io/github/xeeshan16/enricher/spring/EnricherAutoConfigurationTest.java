@@ -307,7 +307,14 @@ class EnricherAutoConfigurationTest {
               assertThat(context.getBean(ProviderRateLimiter.class).limits())
                   .isEqualTo(
                       new ProviderRateLimiter.Limits(
-                          600, 200_000, Duration.ofSeconds(2), 8, 1, 32, 0.5, Duration.ofSeconds(1)));
+                          600,
+                          200_000,
+                          Duration.ofSeconds(2),
+                          8,
+                          1,
+                          32,
+                          0.5,
+                          Duration.ofSeconds(1)));
               PriceTable prices = context.getBean(PriceTable.class);
               assertThat(prices.costMicros("gpt-4o", new TokenUsage(1000, 100))).isEqualTo(3500);
               assertThat(prices.knows("llama3.1-8b")).isTrue();

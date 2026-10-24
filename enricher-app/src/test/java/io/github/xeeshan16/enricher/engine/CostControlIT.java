@@ -63,9 +63,9 @@ import org.testcontainers.kafka.KafkaContainer;
  *       deferred until the budget resets. {@code globex} has no cap. {@code initech} sends only
  *       small amounts, which a skip rule keeps away from the model. Replays of already-enriched
  *       {@code acme} events are free ledger hits even though acme is out of budget.
- *   <li>{@code throttled}: a provider that answers 429 whenever more than 3 calls run at once, while
- *       the pipeline allows 16 in flight. The adaptive limit backs off and every record still gets
- *       enriched, none dead-lettered.
+ *   <li>{@code throttled}: a provider that answers 429 whenever more than 3 calls run at once,
+ *       while the pipeline allows 16 in flight. The adaptive limit backs off and every record still
+ *       gets enriched, none dead-lettered.
  * </ul>
  */
 @Testcontainers
@@ -212,7 +212,8 @@ class CostControlIT {
     assertThat(all).hasSize(27);
 
     Map<String, Integer> outcomes = new TreeMap<>();
-    long resetMillis = Instant.now().truncatedTo(ChronoUnit.DAYS).plus(1, ChronoUnit.DAYS).toEpochMilli();
+    long resetMillis =
+        Instant.now().truncatedTo(ChronoUnit.DAYS).plus(1, ChronoUnit.DAYS).toEpochMilli();
     List<String> replayed = new ArrayList<>();
     for (ConsumerRecord<String, String> r : all) {
       String id = idOf(r.value());
@@ -229,7 +230,8 @@ class CostControlIT {
         JsonNode envelope = MAPPER.readTree(r.value());
         String source = EnricherHeaders.read(r.headers(), EnricherHeaders.RESULT_SOURCE);
         if (envelope.get("enrichment").isNull()) {
-          assertThat(envelope.path("skipped").path("reason").asText()).isEqualTo("rule:small-amount");
+          assertThat(envelope.path("skipped").path("reason").asText())
+              .isEqualTo("rule:small-amount");
           label = "skipped";
         } else {
           label = "enriched:" + envelope.path("model").asText() + ":" + source;

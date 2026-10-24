@@ -10,7 +10,12 @@ import org.junit.jupiter.api.Test;
 class PriceTableTest {
 
   private final PriceTable prices =
-      new PriceTable(Map.of("big", PriceTable.Price.of("2.50", "10.00"), "small", PriceTable.Price.of("0.15", "0.60")));
+      new PriceTable(
+          Map.of(
+              "big",
+              PriceTable.Price.of("2.50", "10.00"),
+              "small",
+              PriceTable.Price.of("0.15", "0.60")));
 
   @Test
   void costIsTokensTimesPricePerMillionInMicroUsd() {

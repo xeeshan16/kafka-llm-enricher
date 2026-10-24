@@ -171,7 +171,8 @@ class PostgresBudgetStoreIT {
 
   @Test
   void purgeDropsOldWindows() {
-    BudgetKey old = new BudgetKey("triage", "t-" + UUID.randomUUID(), Instant.parse("2020-01-01T00:00:00Z"));
+    BudgetKey old =
+        new BudgetKey("triage", "t-" + UUID.randomUUID(), Instant.parse("2020-01-01T00:00:00Z"));
     store.adjust(old, 1, 1, 1);
     assertThat(store.purgeWindowsBefore(Instant.parse("2021-01-01T00:00:00Z"))).isPositive();
     assertThat(store.usage(old)).isEqualTo(BudgetUsage.ZERO);

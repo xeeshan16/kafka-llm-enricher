@@ -81,7 +81,8 @@ public final class CostPolicies {
       PriceTable prices,
       Clock clock) {
     List<SkipRule> rules = new ArrayList<>();
-    p.skip().forEach((rule, expression) -> rules.add(SpelRecordExpressions.skipRule(rule, expression)));
+    p.skip()
+        .forEach((rule, expression) -> rules.add(SpelRecordExpressions.skipRule(rule, expression)));
     TenantResolver tenants =
         p.tenant() == null || p.tenant().isBlank()
             ? TenantResolver.fixed(TenantResolver.DEFAULT_TENANT)

@@ -282,8 +282,8 @@ public record EnricherProperties(
    *     default}
    * @param skip skip rules by name: SpEL conditions under which a record is not sent to the model,
    *     for example {@code event.amount != null and event.amount < 5}
-   * @param emitSkipped write a skipped envelope ({@code "enrichment": null}) for skipped records, so
-   *     the output topic keeps one record per input; {@code false} writes nothing
+   * @param emitSkipped write a skipped envelope ({@code "enrichment": null}) for skipped records,
+   *     so the output topic keeps one record per input; {@code false} writes nothing
    * @param budget per-tenant token and cost caps; none when left out
    */
   public record Pipeline(

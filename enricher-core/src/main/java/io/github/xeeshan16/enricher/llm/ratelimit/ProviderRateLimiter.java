@@ -12,12 +12,14 @@ import java.util.function.LongSupplier;
  * bucket and an {@link AimdLimiter} on concurrency that backs off when the provider answers 429.
  *
  * <p>Token usage is not known before a call, so each call reserves an estimate (prompt tokens plus
- * the output cap) and {@link Permit#succeeded} settles the difference against the usage the provider
- * reported. Over-estimating is deliberate: it errs on the side of staying under the provider's TPM.
+ * the output cap) and {@link Permit#succeeded} settles the difference against the usage the
+ * provider reported. Over-estimating is deliberate: it errs on the side of staying under the
+ * provider's TPM.
  *
- * <p>A call that would have to wait longer than {@link Limits#maxWait()} is refused with a retryable
- * {@link LlmProviderException} carrying the expected wait as its retry-after, so the caller's retry
- * policy (and, after that, the retry topics) take over instead of a worker sleeping indefinitely.
+ * <p>A call that would have to wait longer than {@link Limits#maxWait()} is refused with a
+ * retryable {@link LlmProviderException} carrying the expected wait as its retry-after, so the
+ * caller's retry policy (and, after that, the retry topics) take over instead of a worker sleeping
+ * indefinitely.
  *
  * <p>The limits are per process. With N replicas sharing one provider key, configure each with
  * roughly 1/N of the key's quota.
@@ -124,7 +126,9 @@ public final class ProviderRateLimiter {
             ? TokenBucket.perMinute(limits.requestsPerMinute(), nanoTime)
             : null;
     this.tokens =
-        limits.tokensPerMinute() > 0 ? TokenBucket.perMinute(limits.tokensPerMinute(), nanoTime) : null;
+        limits.tokensPerMinute() > 0
+            ? TokenBucket.perMinute(limits.tokensPerMinute(), nanoTime)
+            : null;
     this.concurrency =
         new AimdLimiter(
             limits.initialConcurrency(),

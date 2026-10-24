@@ -18,7 +18,9 @@ import org.apache.kafka.common.header.internals.RecordHeaders;
  */
 public final class FailureRecords {
 
-  /** Suffix of the topic that parks over-budget records: {@code <input-topic>.enricher-deferred}. */
+  /**
+   * Suffix of the topic that parks over-budget records: {@code <input-topic>.enricher-deferred}.
+   */
   public static final String DEFERRED_SUFFIX = ".enricher-deferred";
 
   private static final int MAX_DETAIL = 1000;

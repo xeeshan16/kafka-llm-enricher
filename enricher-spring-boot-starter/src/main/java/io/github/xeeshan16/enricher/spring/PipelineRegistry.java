@@ -100,8 +100,7 @@ public final class PipelineRegistry {
     RetryTopics retryTopics =
         new RetryTopics(p.inputTopic(), p.retryDelays() == null ? List.of() : p.retryDelays());
     validateBudget(p);
-    String deferred =
-        CostPolicies.defers(p) ? FailureRecords.deferredTopic(p.inputTopic()) : null;
+    String deferred = CostPolicies.defers(p) ? FailureRecords.deferredTopic(p.inputTopic()) : null;
     return new PipelineRuntime(
         groupId, p.concurrency(), settings, retryTopics, p.emitSkipped(), deferred);
   }
@@ -113,7 +112,8 @@ public final class PipelineRegistry {
     }
     if (b.onExceeded() == OverBudgetAction.DOWNGRADE
         && (b.fallbackModel() == null || b.fallbackModel().isBlank())) {
-      throw new IllegalArgumentException("budget.on-exceeded=downgrade needs budget.fallback-model");
+      throw new IllegalArgumentException(
+          "budget.on-exceeded=downgrade needs budget.fallback-model");
     }
     if (b.afterDowngrade() == OverBudgetAction.DOWNGRADE) {
       throw new IllegalArgumentException("budget.after-downgrade must be defer or skip");

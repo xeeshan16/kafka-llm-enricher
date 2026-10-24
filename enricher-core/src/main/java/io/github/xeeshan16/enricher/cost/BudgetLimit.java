@@ -17,6 +17,7 @@ public record BudgetLimit(long maxTokens, long maxCostMicros) {
 
   /** Whether usage of {@code tokens} and {@code costMicros} fits under the caps. */
   public boolean allows(long tokens, long costMicros) {
-    return (maxTokens < 0 || tokens <= maxTokens) && (maxCostMicros < 0 || costMicros <= maxCostMicros);
+    return (maxTokens < 0 || tokens <= maxTokens)
+        && (maxCostMicros < 0 || costMicros <= maxCostMicros);
   }
 }

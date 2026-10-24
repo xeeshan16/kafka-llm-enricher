@@ -26,8 +26,8 @@ public final class EnricherHeaders {
   public static final String TENANT = "enricher-tenant";
 
   /**
-   * Why a record was not sent to the model ({@code rule:<name>} or {@code over-budget}), on
-   * skipped envelopes.
+   * Why a record was not sent to the model ({@code rule:<name>} or {@code over-budget}), on skipped
+   * envelopes.
    */
   public static final String SKIP_REASON = "enricher-skip-reason";
 

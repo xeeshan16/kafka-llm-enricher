@@ -30,7 +30,8 @@ public sealed interface EnrichmentOutcome {
   /**
    * The record was deliberately not sent to the model.
    *
-   * @param reason {@code rule:<name>} for a skip rule, {@code over-budget} for a tenant out of budget
+   * @param reason {@code rule:<name>} for a skip rule, {@code over-budget} for a tenant out of
+   *     budget
    * @param envelope an envelope with {@code "enrichment": null} and a {@code "skipped"} object, for
    *     pipelines that keep one output record per input
    */

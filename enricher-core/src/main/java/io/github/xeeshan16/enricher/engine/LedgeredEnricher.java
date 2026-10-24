@@ -155,8 +155,8 @@ public final class LedgeredEnricher {
   }
 
   /**
-   * Enriches {@code record}, from the ledger when possible, applying the pipeline's cost controls in
-   * this order:
+   * Enriches {@code record}, from the ledger when possible, applying the pipeline's cost controls
+   * in this order:
    *
    * <ol>
    *   <li>skip rules: a matching record is answered with a skipped envelope and never sent;
@@ -190,8 +190,7 @@ public final class LedgeredEnricher {
           tenant,
           pipeline.model(),
           policy.fallbackModel());
-      PreparedRecord cheaper =
-          enricher.prepare(pipeline.withModel(policy.fallbackModel()), record);
+      PreparedRecord cheaper = enricher.prepare(pipeline.withModel(policy.fallbackModel()), record);
       attempt = attempt(cheaper, tenant, policy.budgets());
       action = policy.afterDowngrade();
     } else if (action == OverBudgetAction.DOWNGRADE) {
@@ -338,7 +337,8 @@ public final class LedgeredEnricher {
     try {
       budgets.settle(grant, usage);
     } catch (RuntimeException e) {
-      log.warn("cannot settle budget for {}; the estimate stays charged: {}", grant.key(), e.toString());
+      log.warn(
+          "cannot settle budget for {}; the estimate stays charged: {}", grant.key(), e.toString());
     }
   }
 
@@ -346,7 +346,8 @@ public final class LedgeredEnricher {
     try {
       budgets.refund(grant);
     } catch (RuntimeException e) {
-      log.warn("cannot refund budget for {}; the estimate stays charged: {}", grant.key(), e.toString());
+      log.warn(
+          "cannot refund budget for {}; the estimate stays charged: {}", grant.key(), e.toString());
     }
   }
 

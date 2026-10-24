@@ -164,8 +164,7 @@ public class EnricherAutoConfiguration {
               ? EnricherProperties.BudgetStoreKind.POSTGRES
               : EnricherProperties.BudgetStoreKind.MEMORY;
     }
-    boolean budgeted =
-        properties.pipelines().values().stream().anyMatch(CostPolicies::hasBudget);
+    boolean budgeted = properties.pipelines().values().stream().anyMatch(CostPolicies::hasBudget);
     if (kind == EnricherProperties.BudgetStoreKind.POSTGRES) {
       if (!postgresModule || dataSource == null) {
         throw new IllegalStateException(
@@ -284,8 +283,8 @@ public class EnricherAutoConfiguration {
   }
 
   /**
-   * Longest one provider call can take inside a ledger lease: every attempt may wait up to the
-   * rate limiter's {@code max-wait} to be admitted, then run up to its timeout, with back-off waits
+   * Longest one provider call can take inside a ledger lease: every attempt may wait up to the rate
+   * limiter's {@code max-wait} to be admitted, then run up to its timeout, with back-off waits
    * between attempts.
    */
   static Duration worstCall(EnricherProperties properties) {
@@ -382,7 +381,8 @@ public class EnricherAutoConfiguration {
   }
 
   /**
-   * Input, retry, deferred, output and dead-letter topics of every pipeline, each once, in declaration order.
+   * Input, retry, deferred, output and dead-letter topics of every pipeline, each once, in
+   * declaration order.
    */
   static List<NewTopic> topicsToCreate(
       PipelineRegistry registry, EnricherProperties.Topics topics) {

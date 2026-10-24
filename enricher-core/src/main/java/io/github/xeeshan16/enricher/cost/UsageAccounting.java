@@ -142,8 +142,7 @@ public final class UsageAccounting implements UsageMeter {
       t[8] += l.deferred();
       t[9] += l.downgraded();
     }
-    return new Line(
-        pipeline, "*", "*", t[0], t[1], t[2], t[3], t[4], t[5], t[6], t[7], t[8], t[9]);
+    return new Line(pipeline, "*", "*", t[0], t[1], t[2], t[3], t[4], t[5], t[6], t[7], t[8], t[9]);
   }
 
   /** Skips of {@code pipeline} by reason. */

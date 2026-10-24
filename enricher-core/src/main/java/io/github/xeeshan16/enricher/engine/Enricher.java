@@ -139,9 +139,9 @@ public final class Enricher {
   }
 
   /**
-   * The envelope written for a record that was deliberately not sent to the model: the usual
-   * header fields and input, {@code "enrichment": null} and {@code "skipped": {"reason": ...}}. It
-   * carries no model or usage, since nothing was called, and is deterministic like every envelope.
+   * The envelope written for a record that was deliberately not sent to the model: the usual header
+   * fields and input, {@code "enrichment": null} and {@code "skipped": {"reason": ...}}. It carries
+   * no model or usage, since nothing was called, and is deterministic like every envelope.
    */
   public ObjectNode skippedEnvelope(PreparedRecord prepared, String reason) {
     PipelineDefinition pipeline = prepared.pipeline();

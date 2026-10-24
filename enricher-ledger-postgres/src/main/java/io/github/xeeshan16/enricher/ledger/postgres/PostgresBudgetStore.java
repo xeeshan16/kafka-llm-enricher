@@ -14,13 +14,13 @@ import java.util.Objects;
 import javax.sql.DataSource;
 
 /**
- * {@link BudgetStore} on PostgreSQL, so every instance of a pipeline charges the same counters and a
- * tenant's cap holds across replicas.
+ * {@link BudgetStore} on PostgreSQL, so every instance of a pipeline charges the same counters and
+ * a tenant's cap holds across replicas.
  *
  * <p>{@link #tryCharge} is one {@code INSERT .. ON CONFLICT DO UPDATE .. WHERE} statement: the row
- * lock taken by the upsert serialises concurrent charges of one tenant, and the {@code WHERE} clause
- * sees the latest committed counters, so a charge that would cross the cap updates nothing. The
- * first charge of a window inserts the row; that case is checked against the cap before the
+ * lock taken by the upsert serialises concurrent charges of one tenant, and the {@code WHERE}
+ * clause sees the latest committed counters, so a charge that would cross the cap updates nothing.
+ * The first charge of a window inserts the row; that case is checked against the cap before the
  * statement runs.
  *
  * <p>Uses the table created by {@link LedgerSchema#migrate} ({@code V2__tenant_budget_usage.sql}).
@@ -57,8 +57,7 @@ public final class PostgresBudgetStore implements BudgetStore {
        WHERE pipeline = ? AND tenant = ? AND period_start = ?
       """;
 
-  private static final String PURGE =
-      "DELETE FROM enricher_budget_usage WHERE period_start < ?";
+  private static final String PURGE = "DELETE FROM enricher_budget_usage WHERE period_start < ?";
 
   private final DataSource dataSource;
 

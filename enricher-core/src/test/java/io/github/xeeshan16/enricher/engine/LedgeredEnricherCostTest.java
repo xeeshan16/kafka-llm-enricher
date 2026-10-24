@@ -90,7 +90,10 @@ class LedgeredEnricherCostTest {
   void matchingSkipRuleNeverCallsTheModel() {
     LedgeredEnricher.Result result =
         enricher(provider)
-            .process(pipeline, dispute(1, "Acme", 2.50), policy(List.of(SMALL_AMOUNT), null, OverBudgetAction.DEFER, null));
+            .process(
+                pipeline,
+                dispute(1, "Acme", 2.50),
+                policy(List.of(SMALL_AMOUNT), null, OverBudgetAction.DEFER, null));
 
     assertThat(result.source()).isEqualTo(ResultSource.NONE);
     assertThat(result.tenant()).isEqualTo("Acme");
@@ -115,7 +118,10 @@ class LedgeredEnricherCostTest {
             });
     LedgeredEnricher.Result result =
         enricher(provider)
-            .process(pipeline, dispute(1, "Acme", 2.50), policy(List.of(broken), null, OverBudgetAction.DEFER, null));
+            .process(
+                pipeline,
+                dispute(1, "Acme", 2.50),
+                policy(List.of(broken), null, OverBudgetAction.DEFER, null));
 
     assertThat(result.outcome()).isInstanceOf(EnrichmentOutcome.Enriched.class);
     assertThat(provider.calls()).isOne();
@@ -124,7 +130,8 @@ class LedgeredEnricherCostTest {
   @Test
   void overBudgetIsDeferredUntilTheWindowResetsAndReleasesTheLease() {
     LedgeredEnricher enricher = enricher(provider);
-    CostPolicy policy = policy(List.of(), budgets(new BudgetLimit(0, -1)), OverBudgetAction.DEFER, null);
+    CostPolicy policy =
+        policy(List.of(), budgets(new BudgetLimit(0, -1)), OverBudgetAction.DEFER, null);
 
     LedgeredEnricher.Result result = enricher.process(pipeline, dispute(1, "Acme", 50), policy);
 
@@ -167,10 +174,7 @@ class LedgeredEnricherCostTest {
     // fake-1 reserves about 100 * 10 + 256 * 40 = 11_000 micro-USD; cheap-1 about 110.
     CostPolicy policy =
         policy(
-            List.of(),
-            budgets(new BudgetLimit(-1, 5_000)),
-            OverBudgetAction.DOWNGRADE,
-            "cheap-1");
+            List.of(), budgets(new BudgetLimit(-1, 5_000)), OverBudgetAction.DOWNGRADE, "cheap-1");
 
     LedgeredEnricher.Result result = enricher.process(pipeline, dispute(1, "Acme", 50), policy);
 

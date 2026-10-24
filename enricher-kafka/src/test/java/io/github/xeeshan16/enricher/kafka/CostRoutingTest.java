@@ -88,7 +88,11 @@ class CostRoutingTest {
                 Map.of(),
                 CLOCK);
     return new CostPolicy(
-        List.of(PINGS), TenantResolver.jsonPointer("/merchant"), budgets, action, null,
+        List.of(PINGS),
+        TenantResolver.jsonPointer("/merchant"),
+        budgets,
+        action,
+        null,
         OverBudgetAction.DEFER);
   }
 
@@ -136,7 +140,8 @@ class CostRoutingTest {
         processor(policy(new BudgetLimit(0, -1), OverBudgetAction.DEFER), true);
 
     List<ProducerRecord<String, String>> out =
-        processor.process(input("{\"type\":\"dispute\",\"merchant\":\"acme\",\"note\":\"refund\"}"));
+        processor.process(
+            input("{\"type\":\"dispute\",\"merchant\":\"acme\",\"note\":\"refund\"}"));
 
     assertThat(out).hasSize(1);
     ProducerRecord<String, String> deferred = out.getFirst();
@@ -145,8 +150,7 @@ class CostRoutingTest {
     assertThat(header(deferred, EnricherHeaders.FAILURE_REASON)).isEqualTo("BUDGET_EXCEEDED");
     assertThat(header(deferred, EnricherHeaders.TENANT)).isEqualTo("acme");
     long resets = Instant.parse("2026-10-25T00:00:00Z").toEpochMilli();
-    assertThat(header(deferred, EnricherHeaders.RETRY_NOT_BEFORE))
-        .isEqualTo(Long.toString(resets));
+    assertThat(header(deferred, EnricherHeaders.RETRY_NOT_BEFORE)).isEqualTo(Long.toString(resets));
     assertThat(header(deferred, EnricherHeaders.ORIGINAL_TOPIC)).isEqualTo("in");
     assertThat(header(deferred, EnricherHeaders.ORIGINAL_OFFSET)).isEqualTo("7");
     assertThat(provider.calls()).isZero();
