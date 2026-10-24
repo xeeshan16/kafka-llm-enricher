@@ -50,6 +50,24 @@ public record PipelineDefinition(
     }
   }
 
+  /**
+   * The same pipeline asking a different model, for routing over-budget records to a cheaper one.
+   * The model is part of the result-ledger key, so answers of the two models never mix.
+   */
+  public PipelineDefinition withModel(String otherModel) {
+    return new PipelineDefinition(
+        name,
+        inputTopic,
+        outputTopic,
+        deadLetterTopic,
+        promptVersion,
+        otherModel,
+        systemPrompt,
+        userTemplate,
+        outputSchema,
+        maxOutputTokens);
+  }
+
   private static void requireText(String value, String field) {
     if (value == null || value.isBlank()) {
       throw new IllegalArgumentException(field + " must not be blank");

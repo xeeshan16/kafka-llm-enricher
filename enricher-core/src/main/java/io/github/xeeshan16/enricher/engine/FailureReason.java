@@ -15,6 +15,11 @@ public enum FailureReason {
   RETRIES_EXHAUSTED,
   /** Another worker held the record's ledger lease for longer than every retry allowed. */
   LEDGER_BUSY,
+  /**
+   * The tenant's budget was exhausted; written on records parked on the deferred topic until the
+   * budget window resets.
+   */
+  BUDGET_EXCEEDED,
   /** Anything else, for example a bug or an exception thrown while handling the record. */
   PROCESSING_ERROR
 }

@@ -1,5 +1,6 @@
 package io.github.xeeshan16.enricher.kafka;
 
+import io.github.xeeshan16.enricher.cost.CostPolicy;
 import io.github.xeeshan16.enricher.engine.EnrichmentOutcome;
 import io.github.xeeshan16.enricher.engine.FailureReason;
 import io.github.xeeshan16.enricher.engine.LedgeredEnricher;
@@ -31,8 +32,14 @@ import org.slf4j.LoggerFactory;
  *       <td>next retry topic, or dead-letter topic as {@code LEDGER_BUSY}</td></tr>
  *   <tr><td>any other exception (a poison record, a bug)</td>
  *       <td>dead-letter topic as {@code PROCESSING_ERROR}</td></tr>
+ *   <tr><td>a skip rule matched, or over budget with action {@code skip}</td>
+ *       <td>skipped envelope on the output topic, or nothing when {@code emitSkipped} is off</td></tr>
+ *   <tr><td>over budget with action {@code defer}</td>
+ *       <td>{@code <input>.enricher-deferred}, due when the budget window resets</td></tr>
  *   <tr><td>tombstone (null value)</td><td>nothing</td></tr>
  * </table>
+ *
+ * <p>Enriched, skipped and deferred records carry an {@code enricher-tenant} header.
  *
  * <p>Waiting for another worker's lease happens on this worker thread, which costs nothing in the
  * poll loop, and is bounded by {@code busyBudget} (about one lease lifetime): by then the other
@@ -57,6 +64,8 @@ public final class EnrichmentProcessor implements RecordProcessor {
   private final Duration busyBudget;
   private final Clock clock;
   private final Sleeper sleeper;
+  private final CostPolicy costPolicy;
+  private final boolean emitSkipped;
 
   public EnrichmentProcessor(
       PipelineDefinition pipeline,
@@ -67,6 +76,37 @@ public final class EnrichmentProcessor implements RecordProcessor {
       Duration busyBudget,
       Clock clock,
       Sleeper sleeper) {
+    this(
+        pipeline,
+        enricher,
+        retryTopics,
+        outputs,
+        busyRetryInterval,
+        busyBudget,
+        clock,
+        sleeper,
+        CostPolicy.none(),
+        true);
+  }
+
+  /**
+   * @param costPolicy skip rules, tenant and budgets of this pipeline
+   * @param emitSkipped write a skipped envelope for skipped records (one output per input), or
+   *     nothing
+   */
+  public EnrichmentProcessor(
+      PipelineDefinition pipeline,
+      LedgeredEnricher enricher,
+      RetryTopics retryTopics,
+      OutputRecordFactory outputs,
+      Duration busyRetryInterval,
+      Duration busyBudget,
+      Clock clock,
+      Sleeper sleeper,
+      CostPolicy costPolicy,
+      boolean emitSkipped) {
+    this.costPolicy = Objects.requireNonNull(costPolicy, "costPolicy");
+    this.emitSkipped = emitSkipped;
     this.pipeline = Objects.requireNonNull(pipeline, "pipeline");
     this.enricher = Objects.requireNonNull(enricher, "enricher");
     this.retryTopics = Objects.requireNonNull(retryTopics, "retryTopics");
@@ -100,6 +140,10 @@ public final class EnrichmentProcessor implements RecordProcessor {
     return pipeline;
   }
 
+  public CostPolicy costPolicy() {
+    return costPolicy;
+  }
+
   @Override
   public List<ProducerRecord<String, String>> process(ConsumerRecord<String, String> record) {
     if (record.value() == null) {
@@ -110,10 +154,34 @@ public final class EnrichmentProcessor implements RecordProcessor {
     long busyDeadline = clock.millis() + busyBudget.toMillis();
     while (true) {
       try {
-        LedgeredEnricher.Result result = enricher.process(pipeline, input);
+        LedgeredEnricher.Result result = enricher.process(pipeline, input, costPolicy);
         return switch (result.outcome()) {
           case EnrichmentOutcome.Enriched enriched ->
-              List.of(outputs.enriched(pipeline, input, enriched, result.source()));
+              List.of(
+                  withTenant(
+                      outputs.enriched(pipeline, input, enriched, result.source()),
+                      result.tenant()));
+          case EnrichmentOutcome.Skipped skipped ->
+              emitSkipped
+                  ? List.of(withTenant(outputs.skipped(pipeline, input, skipped), result.tenant()))
+                  : List.of();
+          case EnrichmentOutcome.Deferred deferred -> {
+            log.info(
+                "pipeline={} deferring {}-{}@{} until {}: {}",
+                pipeline.name(),
+                input.topic(),
+                input.partition(),
+                input.offset(),
+                deferred.until(),
+                deferred.detail());
+            yield List.of(
+                failures.deferred(
+                    record,
+                    stage,
+                    deferred.tenant(),
+                    deferred.until().toEpochMilli(),
+                    deferred.detail()));
+          }
           case EnrichmentOutcome.Failed failed -> {
             log.warn(
                 "pipeline={} cannot enrich {}-{}@{}: {} {}",
@@ -195,6 +263,14 @@ public final class EnrichmentProcessor implements RecordProcessor {
     } catch (NumberFormatException e) {
       return 0;
     }
+  }
+
+  private static ProducerRecord<String, String> withTenant(
+      ProducerRecord<String, String> record, String tenant) {
+    if (record.headers().lastHeader(EnricherHeaders.TENANT) == null) {
+      record.headers().add(EnricherHeaders.TENANT, EnricherHeaders.utf8(tenant));
+    }
+    return record;
   }
 
   private void pause() {

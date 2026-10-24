@@ -18,9 +18,18 @@ public final class EnricherHeaders {
 
   /**
    * {@code provider} when this delivery paid for a model call, {@code ledger} when it reused a
-   * stored result. On enriched records.
+   * stored result, {@code none} on skipped envelopes.
    */
   public static final String RESULT_SOURCE = "enricher-result-source";
+
+  /** Tenant the record's spend was charged to, on enriched, skipped and deferred records. */
+  public static final String TENANT = "enricher-tenant";
+
+  /**
+   * Why a record was not sent to the model ({@code rule:<name>} or {@code over-budget}), on
+   * skipped envelopes.
+   */
+  public static final String SKIP_REASON = "enricher-skip-reason";
 
   /**
    * {@link io.github.xeeshan16.enricher.engine.FailureReason} name, on retry and dead-lettered
@@ -37,7 +46,7 @@ public final class EnricherHeaders {
    */
   public static final String ATTEMPTS = "enricher-attempts";
 
-  /** Epoch milliseconds before which a retry record must not be processed. */
+  /** Epoch milliseconds before which a retry or deferred record must not be processed. */
   public static final String RETRY_NOT_BEFORE = "enricher-retry-not-before";
 
   /** Topic of the original input record, on retry and dead-lettered records. */

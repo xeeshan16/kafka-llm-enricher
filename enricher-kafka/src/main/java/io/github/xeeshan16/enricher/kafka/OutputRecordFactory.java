@@ -25,4 +25,24 @@ public interface OutputRecordFactory {
       InputRecord input,
       EnrichmentOutcome.Enriched outcome,
       ResultSource source);
+
+  /**
+   * The output for a record that was deliberately not sent to the model (a skip rule matched, or
+   * its tenant was over budget with action {@code skip}). The default writes the skipped envelope,
+   * keyed like enriched output, so the output topic keeps one record per input; it carries {@code
+   * enricher-result-source: none} and an {@code enricher-skip-reason} header.
+   */
+  default ProducerRecord<String, String> skipped(
+      PipelineDefinition pipeline, InputRecord input, EnrichmentOutcome.Skipped outcome) {
+    ProducerRecord<String, String> record =
+        new ProducerRecord<>(pipeline.outputTopic(), input.key(), outcome.envelope().toString());
+    record.headers().add(EnricherHeaders.PIPELINE, EnricherHeaders.utf8(pipeline.name()));
+    record
+        .headers()
+        .add(EnricherHeaders.PROMPT_VERSION, EnricherHeaders.utf8(pipeline.promptVersion()));
+    record.headers().add(EnricherHeaders.INPUT_HASH, EnricherHeaders.utf8(outcome.inputHash()));
+    record.headers().add(EnricherHeaders.RESULT_SOURCE, EnricherHeaders.utf8("none"));
+    record.headers().add(EnricherHeaders.SKIP_REASON, EnricherHeaders.utf8(outcome.reason()));
+    return record;
+  }
 }

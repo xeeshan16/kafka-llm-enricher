@@ -138,6 +138,26 @@ public final class Enricher {
         new LlmResponse(enrichmentJson, model, usage, Duration.ZERO));
   }
 
+  /**
+   * The envelope written for a record that was deliberately not sent to the model: the usual
+   * header fields and input, {@code "enrichment": null} and {@code "skipped": {"reason": ...}}. It
+   * carries no model or usage, since nothing was called, and is deterministic like every envelope.
+   */
+  public ObjectNode skippedEnvelope(PreparedRecord prepared, String reason) {
+    PipelineDefinition pipeline = prepared.pipeline();
+    InputRecord record = prepared.record();
+    ObjectNode envelope = mapper.createObjectNode();
+    envelope.put("format", ENVELOPE_FORMAT);
+    envelope.put("pipeline", pipeline.name());
+    envelope.put("promptVersion", pipeline.promptVersion());
+    envelope.put("inputHash", prepared.inputHash());
+    putSource(envelope, record);
+    envelope.set("input", prepared.input());
+    envelope.putNull("enrichment");
+    envelope.putObject("skipped").put("reason", reason);
+    return envelope;
+  }
+
   private EnrichmentOutcome.Enriched fromStored(
       PreparedRecord prepared,
       String enrichmentJson,
@@ -176,6 +196,16 @@ public final class Enricher {
     envelope.put("promptVersion", pipeline.promptVersion());
     envelope.put("model", model);
     envelope.put("inputHash", inputHash);
+    putSource(envelope, record);
+    envelope.set("input", input);
+    envelope.set("enrichment", enrichment);
+    ObjectNode usageNode = envelope.putObject("usage");
+    usageNode.put("inputTokens", usage.inputTokens());
+    usageNode.put("outputTokens", usage.outputTokens());
+    return envelope;
+  }
+
+  private static void putSource(ObjectNode envelope, InputRecord record) {
     ObjectNode source = envelope.putObject("source");
     source.put("topic", record.topic());
     source.put("partition", record.partition());
@@ -185,12 +215,6 @@ public final class Enricher {
     } else {
       source.put("key", record.key());
     }
-    envelope.set("input", input);
-    envelope.set("enrichment", enrichment);
-    ObjectNode usageNode = envelope.putObject("usage");
-    usageNode.put("inputTokens", usage.inputTokens());
-    usageNode.put("outputTokens", usage.outputTokens());
-    return envelope;
   }
 
   /**

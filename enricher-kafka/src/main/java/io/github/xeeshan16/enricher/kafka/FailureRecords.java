@@ -18,6 +18,9 @@ import org.apache.kafka.common.header.internals.RecordHeaders;
  */
 public final class FailureRecords {
 
+  /** Suffix of the topic that parks over-budget records: {@code <input-topic>.enricher-deferred}. */
+  public static final String DEFERRED_SUFFIX = ".enricher-deferred";
+
   private static final int MAX_DETAIL = 1000;
   private static final List<String> REPLACED =
       List.of(
@@ -25,7 +28,8 @@ public final class FailureRecords {
           EnricherHeaders.FAILURE_REASON,
           EnricherHeaders.FAILURE_DETAIL,
           EnricherHeaders.ATTEMPTS,
-          EnricherHeaders.RETRY_NOT_BEFORE);
+          EnricherHeaders.RETRY_NOT_BEFORE,
+          EnricherHeaders.TENANT);
 
   private final PipelineDefinition pipeline;
   private final RetryTopics retryTopics;
@@ -56,6 +60,29 @@ public final class FailureRecords {
     }
     return new InputRecord(
         record.topic(), record.partition(), record.offset(), record.key(), record.value());
+  }
+
+  /** The deferred topic of a pipeline consuming {@code inputTopic}. */
+  public static String deferredTopic(String inputTopic) {
+    return inputTopic + DEFERRED_SUFFIX;
+  }
+
+  /**
+   * A record parked on the deferred topic until {@code untilMillis}, when its tenant's budget
+   * resets. The pipeline consumes the deferred topic and holds the record until then without
+   * blocking anything else.
+   */
+  public ProducerRecord<String, String> deferred(
+      ConsumerRecord<String, String> record,
+      int stage,
+      String tenant,
+      long untilMillis,
+      String detail) {
+    RecordHeaders headers = headers(record, stage, FailureReason.BUDGET_EXCEEDED, detail);
+    headers.add(EnricherHeaders.RETRY_NOT_BEFORE, EnricherHeaders.utf8(Long.toString(untilMillis)));
+    headers.add(EnricherHeaders.TENANT, EnricherHeaders.utf8(tenant));
+    return new ProducerRecord<>(
+        deferredTopic(pipeline.inputTopic()), null, record.key(), record.value(), headers);
   }
 
   /** Delivery stages tried, including this one, for a record consumed at {@code stage}. */
