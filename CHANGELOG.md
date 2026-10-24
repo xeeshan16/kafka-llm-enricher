@@ -7,6 +7,17 @@ All notable changes to this project are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- `enricher-kafka` module: `ConsumerLoop`, a poll loop that never blocks on model calls. Records run
+  in parallel by lane (per key within a partition by default, `partition` or `unordered`), finished
+  prefixes commit together in one Kafka transaction per `commit-interval`, and full partitions are
+  paused and resumed. See ADR 0003.
+- Retry topics `<input>.enricher-retry-N` with per-stage delays (`retry-delays`) and an
+  `enricher-retry-not-before` header; dead-lettered records carry `enricher-attempts` and the
+  original topic, partition and offset. New reason `RETRIES_EXHAUSTED`.
+- `ResilientLlmProvider`: per-call timeout and full-jitter retries honouring `Retry-After`,
+  configured under `enricher.resilience.*`.
+- `ConcurrencyAndRetryIT`: per-key order under a slow call, retry topic delays, dead-letter reasons
+  and poison records against real Kafka and PostgreSQL.
 - Exactly-once delivery: with `spring.kafka.producer.transaction-id-prefix` set, each record is
   processed read-process-write in one Kafka transaction, and dead-lettering commits its offset in a
   transaction too. `enricher.delivery` (`auto`, `exactly-once`, `at-least-once`) fails startup when
@@ -30,6 +41,9 @@ All notable changes to this project are documented here. The format follows
   Testcontainers Kafka integration test.
 
 ### Changed
+- The starter runs pipelines on `ConsumerLoop` instead of Spring Kafka listener containers.
+  `EnrichedRecordSink`, `EnrichingListener` and the after-rollback wiring are removed; Kafka client
+  settings still come from `spring.kafka.*`.
 - `EnrichedRecordSink.publish` takes the `ResultSource`; `PipelineRunner` takes a
   `LedgeredEnricher`, a busy back-off and an optional transaction manager.
 - The enrichment in the envelope is written in canonical (sorted) key order.

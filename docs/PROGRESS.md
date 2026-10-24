@@ -62,3 +62,30 @@
 - Each record is its own Kafka transaction for now. Day 3's per-key parallelism will revisit transaction batching.
 
 **Next (day 3):** per-key ordered parallelism within a partition, pause/resume so the poll loop never blocks on slow calls, timeouts and full-jitter retries, retry topics and poison-message tests.
+
+## Day 3 (2026-10-23): concurrency, backpressure and retry topics
+
+**Built**
+
+- `enricher-core`
+  - `ResilientLlmProvider`: each attempt runs on a virtual thread with a timeout; retryable failures are retried with full-jitter back-off (`FullJitterBackoff`), never sooner than a provider's `Retry-After`.
+  - `LlmProviderException` carries an optional retry-after; timeouts surface as a retryable `LlmTimeoutException`. New `FailureReason.RETRIES_EXHAUSTED`.
+- `enricher-kafka` (new module, no Spring dependency), see [ADR 0003](adr/0003-own-consumer-loop-with-key-lanes.md)
+  - `ConsumerLoop`: one poll thread per consumer that never blocks on a model call. Records are buffered per partition and run on virtual threads by lane (per key within a partition by default, or per partition, or unordered), up to `max-in-flight`.
+  - Finished prefixes are written and committed together, one Kafka transaction per `commit-interval`. Partitions with too many uncommitted records are paused and resumed at half. Failed commits abort and rewind; revoked partitions drop their in-flight output.
+  - `EnrichmentProcessor` routes every outcome: output topic, `<input>.enricher-retry-N` with a due-time header, or the dead-letter topic with reason, attempt count and original coordinates. `LaneScheduler`, `PartitionState`, `RetryTopics`, `FailureRecords`, `EngineStats`.
+- `enricher-spring-boot-starter`: one `ConsumerLoop` per pipeline consumer, transactional ids derived from `spring.kafka.producer.transaction-id-prefix`; per-pipeline `ordering`, `max-in-flight`, `max-pending-per-partition`, `commit-interval`, `retry-delays`, and `enricher.resilience.*`. The Spring Kafka listener, sink and after-rollback wiring are gone.
+- Tests: `ConsumerLoopTest` (MockConsumer/MockProducer), `EnrichmentProcessorTest`, `LaneSchedulerTest`, `PartitionStateTest`, `ResilientLlmProviderTest`, `FullJitterBackoffTest`; `ConcurrencyAndRetryIT` on Kafka + PostgreSQL; the chaos test now aborts batched transactions and moves partitions while a call hangs past `max.poll.interval.ms`.
+
+**Verified**
+
+- In CI on `dev`: run [39960069430](https://github.com/xeeshan16/kafka-llm-enricher/actions/runs/39960069430) green for `dacf435` (Error Prone, formatting, unit and Testcontainers tests). `main` was fast-forwarded to `dacf435` at the start of day 4.
+- `ConcurrencyAndRetryIT` (same run): 8 keys x 5 records on one partition, one call of 5 s with `max.poll.interval.ms` = 3 s: all 40 records in 7.9 s, up to 8 concurrent calls, 35 records of other keys finished while the slow call ran, 0 partitions revoked or lost, 5 commits. Every key's output in input order.
+- Routing in the same run: `transient-1` recovered on the output topic after 5 calls through both retry topics; `always-1` dead-lettered as `RETRIES_EXHAUSTED` after 3 stages (6 calls); `fatal-1` as `PROVIDER_ERROR` and `poison-1` as `PROCESSING_ERROR` after 1 call each, without blocking the record behind it on the same key.
+- Chaos test (same run): 40 committed envelopes, 1 provider call per input, 4 aborted transactions, a hung worker, 12 partitions revoked, 0 lost; ledger 40 completed rows, 54 hits.
+- Locally: nothing beyond the core unit tests (against distro jars with a stub schema validator).
+
+**Notes and plan adjustments**
+
+- Day 3 replaced Spring Kafka's listener containers with an own loop on `kafka-clients` (ADR 0003): container-managed transactions cannot be combined with asynchronous listeners, and a blocking listener cannot stop slow calls from triggering rebalances.
+- At the start of day 4 there was no day-3 progress entry, `main` had not been fast-forwarded and no day-3 Slack post had gone out, although the day-3 code was green on `dev`. Day 4 picked those up first.
