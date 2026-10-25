@@ -152,6 +152,9 @@ class CostControlIT {
                 "--enricher.pipelines.costed.output-topic=it.costed.out",
                 "--enricher.pipelines.costed.max-output-tokens=64",
                 "--enricher.pipelines.costed.user-template=Classify {{event}}",
+                // The caps below are sized for this short prompt; the guard would add ~150 input
+                // tokens per call and change which call crosses the cap.
+                "--enricher.pipelines.costed.prompt-guard=false",
                 "--enricher.pipelines.costed.output-schema=classpath:schemas/dispute-triage.v1.json",
                 "--enricher.pipelines.costed.tenant=event.merchantId",
                 "--enricher.pipelines.costed.skip.small-amount=event.amount != null and event.amount < 5",

@@ -21,10 +21,15 @@ import io.github.xeeshan16.enricher.ledger.ResultLedger;
 import io.github.xeeshan16.enricher.llm.LlmProvider;
 import io.github.xeeshan16.enricher.llm.TokenUsage;
 import io.github.xeeshan16.enricher.llm.fake.FakeLlmProvider;
+import io.github.xeeshan16.enricher.llm.http.AnthropicProvider;
+import io.github.xeeshan16.enricher.llm.http.AzureOpenAiProvider;
+import io.github.xeeshan16.enricher.llm.http.OpenAiCompatibleProvider;
 import io.github.xeeshan16.enricher.llm.ratelimit.ProviderRateLimiter;
 import io.github.xeeshan16.enricher.llm.ratelimit.RateLimitedLlmProvider;
 import io.github.xeeshan16.enricher.llm.resilience.ResilientLlmProvider;
 import io.github.xeeshan16.enricher.pipeline.PipelineDefinition;
+import io.github.xeeshan16.enricher.privacy.OutputPiiAction;
+import io.github.xeeshan16.enricher.privacy.PiiDetectors;
 import java.time.Duration;
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.autoconfigure.AutoConfigurations;
@@ -65,8 +70,17 @@ class EnricherAutoConfigurationTest {
           assertThat(context).doesNotHaveBean(KafkaAdmin.NewTopics.class);
           assertThat(context.getBean(ResultLedger.class)).isInstanceOf(InMemoryResultLedger.class);
           assertThat(context.getBean(PipelineRunner.class).transactional()).isFalse();
+          // Long enough for the first call and the default repair call, each at worst 115 s.
           assertThat(context.getBean(LedgeredEnricher.class).settings().leaseTtl())
-              .isEqualTo(Duration.ofMinutes(2));
+              .isEqualTo(Duration.ofMinutes(4));
+          // Masking, the guard and one repair attempt are on by default.
+          assertThat(pipeline.repairAttempts()).isEqualTo(1);
+          assertThat(pipeline.safety().guard()).isTrue();
+          assertThat(pipeline.safety().outputPii()).isEqualTo(OutputPiiAction.MASK);
+          assertThat(pipeline.safety().masker().detectors())
+              .containsExactly(
+                  PiiDetectors.PAN, PiiDetectors.IBAN, PiiDetectors.EMAIL, PiiDetectors.PHONE);
+          assertThat(pipeline.safety().masker().fieldPaths()).isEmpty();
           PipelineRegistry.PipelineRuntime runtime = registry.runtime("triage");
           assertThat(runtime.engine().ordering()).isEqualTo(OrderingMode.KEY);
           assertThat(runtime.engine().maxInFlight()).isEqualTo(16);
@@ -423,7 +437,108 @@ class EnricherAutoConfigurationTest {
   }
 
   @Test
+  void worstLeaseCoversTheRepairCalls() {
+    runner
+        .withPropertyValues("enricher.pipelines.triage.repair-attempts=2")
+        .run(
+            context ->
+                assertThat(
+                        EnricherAutoConfiguration.worstLease(
+                            context.getBean(EnricherProperties.class)))
+                    .isEqualTo(Duration.ofSeconds(345)));
+  }
+
+  @Test
+  void bindsMaskingGuardAndRepairSettings() {
+    runner
+        .withPropertyValues(
+            "enricher.pipelines.triage.mask-pii=pan,email",
+            "enricher.pipelines.triage.mask-fields=customer.name, customer.address",
+            "enricher.pipelines.triage.prompt-guard=false",
+            "enricher.pipelines.triage.output-pii=reject",
+            "enricher.pipelines.triage.repair-attempts=0",
+            "enricher.pipelines.other.input-topic=in2",
+            "enricher.pipelines.other.output-topic=out2",
+            "enricher.pipelines.other.user-template={{event}}",
+            "enricher.pipelines.other.output-schema=classpath:schemas/test.json",
+            "enricher.pipelines.other.mask-pii=none")
+        .run(
+            context -> {
+              assertThat(context).hasNotFailed();
+              PipelineRegistry registry = context.getBean(PipelineRegistry.class);
+              PipelineDefinition triage = registry.find("triage").orElseThrow();
+              assertThat(triage.safety().masker().detectors())
+                  .containsExactly(PiiDetectors.PAN, PiiDetectors.EMAIL);
+              assertThat(triage.safety().masker().fieldPaths())
+                  .containsExactlyInAnyOrder("customer.name", "customer.address");
+              assertThat(triage.safety().guard()).isFalse();
+              assertThat(triage.safety().outputPii()).isEqualTo(OutputPiiAction.REJECT);
+              assertThat(triage.repairAttempts()).isZero();
+              PipelineDefinition other = registry.find("other").orElseThrow();
+              assertThat(other.safety().masker().enabled()).isFalse();
+            });
+  }
+
+  @Test
+  void unknownPiiTypeOrTooManyRepairsFailStartup() {
+    runner
+        .withPropertyValues("enricher.pipelines.triage.mask-pii=pan,ssn")
+        .run(
+            context ->
+                assertThat(context)
+                    .hasFailed()
+                    .getFailure()
+                    .hasStackTraceContaining("enricher.pipelines.triage")
+                    .hasStackTraceContaining("unknown PII type 'ssn'"));
+    runner
+        .withPropertyValues("enricher.pipelines.triage.repair-attempts=3")
+        .run(
+            context ->
+                assertThat(context)
+                    .hasFailed()
+                    .getFailure()
+                    .hasStackTraceContaining("repairAttempts must be between 0 and 2"));
+  }
+
+  @Test
   void unknownProviderFailsStartup() {
+    runner
+        .withPropertyValues("enricher.provider=gemini")
+        .run(
+            context ->
+                assertThat(context)
+                    .hasFailed()
+                    .getFailure()
+                    .rootCause()
+                    .hasMessageContaining("enricher.provider='gemini' is not supported"));
+  }
+
+  @Test
+  void openAiCompatibleProviderForALocalServerNeedsNoKey() {
+    runner
+        .withPropertyValues(
+            "enricher.provider=openai",
+            "enricher.providers.openai.base-url=http://localhost:11434/v1",
+            "enricher.providers.openai.structured-output=json-object",
+            "enricher.providers.openai.temperature=none",
+            "enricher.providers.openai.headers.[X-Team]=payments")
+        .run(
+            context -> {
+              assertThat(context).hasNotFailed();
+              OpenAiCompatibleProvider provider =
+                  (OpenAiCompatibleProvider) context.getBean(LlmProvider.class);
+              assertThat(provider.settings().baseUrl().toString())
+                  .isEqualTo("http://localhost:11434/v1");
+              assertThat(provider.settings().hasApiKey()).isFalse();
+              assertThat(provider.settings().headers()).containsEntry("X-Team", "payments");
+              assertThat(provider.options().structuredOutput())
+                  .isEqualTo(OpenAiCompatibleProvider.StructuredOutput.JSON_OBJECT);
+              assertThat(provider.options().temperature()).isNull();
+            });
+  }
+
+  @Test
+  void hostedProvidersNeedTheirCredentials() {
     runner
         .withPropertyValues("enricher.provider=openai")
         .run(
@@ -432,7 +547,35 @@ class EnricherAutoConfigurationTest {
                     .hasFailed()
                     .getFailure()
                     .rootCause()
-                    .hasMessageContaining("enricher.provider='openai'"));
+                    .hasMessageContaining("enricher.providers.openai.api-key is required"));
+    runner
+        .withPropertyValues("enricher.provider=azure-openai")
+        .run(
+            context ->
+                assertThat(context)
+                    .hasFailed()
+                    .getFailure()
+                    .rootCause()
+                    .hasMessageContaining("enricher.providers.azure-openai.endpoint is required"));
+    runner
+        .withPropertyValues(
+            "enricher.provider=azure-openai",
+            "enricher.providers.azure-openai.endpoint=https://example.openai.azure.com",
+            "enricher.providers.azure-openai.api-key=placeholder")
+        .run(
+            context ->
+                assertThat(context.getBean(LlmProvider.class))
+                    .isInstanceOf(AzureOpenAiProvider.class));
+    runner
+        .withPropertyValues(
+            "enricher.provider=anthropic", "enricher.providers.anthropic.api-key=placeholder")
+        .run(
+            context -> {
+              AnthropicProvider provider = (AnthropicProvider) context.getBean(LlmProvider.class);
+              assertThat(provider.settings().baseUrl().toString())
+                  .isEqualTo("https://api.anthropic.com");
+              assertThat(provider.settings().toString()).doesNotContain("placeholder");
+            });
   }
 
   @Test

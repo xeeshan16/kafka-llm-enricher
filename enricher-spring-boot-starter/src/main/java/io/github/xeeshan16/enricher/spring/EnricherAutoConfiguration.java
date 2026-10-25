@@ -17,7 +17,6 @@ import io.github.xeeshan16.enricher.ledger.ResultLedger;
 import io.github.xeeshan16.enricher.llm.EmbeddingProvider;
 import io.github.xeeshan16.enricher.llm.LlmProvider;
 import io.github.xeeshan16.enricher.llm.fake.FakeEmbeddingProvider;
-import io.github.xeeshan16.enricher.llm.fake.FakeLlmProvider;
 import io.github.xeeshan16.enricher.llm.ratelimit.ProviderRateLimiter;
 import io.github.xeeshan16.enricher.llm.ratelimit.RateLimitedLlmProvider;
 import io.github.xeeshan16.enricher.llm.resilience.ResilientLlmProvider;
@@ -75,13 +74,7 @@ public class EnricherAutoConfiguration {
   @Bean
   @ConditionalOnMissingBean
   public LlmProvider enricherLlmProvider(EnricherProperties properties) {
-    if (!"fake".equals(properties.provider())) {
-      throw new IllegalStateException(
-          "enricher.provider='"
-              + properties.provider()
-              + "' is not available in this version; supported: fake");
-    }
-    return new FakeLlmProvider();
+    return ProviderFactory.create(properties.provider(), properties.providers());
   }
 
   @Bean
@@ -267,13 +260,14 @@ public class EnricherAutoConfiguration {
       EnricherProperties properties,
       ObjectProvider<UsageMeter> meters) {
     EnricherProperties.Ledger l = properties.ledger();
-    Duration worstCall = worstCall(properties);
-    if (l.leaseTtl().compareTo(worstCall) < 0) {
+    Duration worstLease = worstLease(properties);
+    if (l.leaseTtl().compareTo(worstLease) < 0) {
       log.warn(
           "enricher.ledger.lease-ttl ({}) is shorter than the worst-case provider call with retries"
-              + " ({}); a lease can lapse mid-call and let a second worker pay for the same key",
+              + " and repair calls ({}); a lease can lapse mid-call and let a second worker pay for"
+              + " the same key",
           l.leaseTtl(),
-          worstCall);
+          worstLease);
     }
     return new LedgeredEnricher(
         enricher,
@@ -295,6 +289,19 @@ public class EnricherAutoConfiguration {
                 .rateLimit()
                 .maxWait()
                 .multipliedBy(Math.max(1, properties.resilience().maxAttempts())));
+  }
+
+  /**
+   * Longest a ledger lease must last: the first call and every repair call of the pipeline with the
+   * most repair attempts, each as long as {@link #worstCall}.
+   */
+  static Duration worstLease(EnricherProperties properties) {
+    int repairs =
+        properties.pipelines().values().stream()
+            .mapToInt(EnricherProperties.Pipeline::repairAttempts)
+            .max()
+            .orElse(0);
+    return worstCall(properties).multipliedBy(1L + Math.max(0, repairs));
   }
 
   @Bean

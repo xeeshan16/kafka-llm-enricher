@@ -6,12 +6,17 @@ import io.github.xeeshan16.enricher.kafka.FailureRecords;
 import io.github.xeeshan16.enricher.kafka.RetryTopics;
 import io.github.xeeshan16.enricher.pipeline.PipelineDefinition;
 import io.github.xeeshan16.enricher.pipeline.PromptTemplate;
+import io.github.xeeshan16.enricher.privacy.PiiDetector;
+import io.github.xeeshan16.enricher.privacy.PiiDetectors;
+import io.github.xeeshan16.enricher.privacy.PiiMasker;
+import io.github.xeeshan16.enricher.privacy.PromptSafety;
 import io.github.xeeshan16.enricher.schema.OutputSchema;
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -144,7 +149,24 @@ public final class PipelineRegistry {
         p.systemPrompt(),
         PromptTemplate.compile(p.userTemplate()),
         OutputSchema.parse(read(p)),
-        p.maxOutputTokens());
+        p.maxOutputTokens(),
+        safety(p),
+        p.repairAttempts());
+  }
+
+  /** Masking, guard and answer handling from {@code mask-pii}, {@code mask-fields} and friends. */
+  static PromptSafety safety(EnricherProperties.Pipeline p) {
+    List<PiiDetector> detectors = new ArrayList<>();
+    for (String name : new LinkedHashSet<>(p.maskPii())) {
+      if (name.isBlank() || name.strip().equalsIgnoreCase("none")) {
+        continue;
+      }
+      detectors.add(PiiDetectors.named(name));
+    }
+    PiiMasker masker =
+        new PiiMasker(
+            detectors, new LinkedHashSet<>(p.maskFields().stream().map(String::strip).toList()));
+    return new PromptSafety(masker, p.promptGuard(), p.outputPii());
   }
 
   private static String read(EnricherProperties.Pipeline p) {

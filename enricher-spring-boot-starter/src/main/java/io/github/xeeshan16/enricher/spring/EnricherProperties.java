@@ -3,6 +3,9 @@ package io.github.xeeshan16.enricher.spring;
 import io.github.xeeshan16.enricher.cost.BudgetPeriod;
 import io.github.xeeshan16.enricher.cost.OverBudgetAction;
 import io.github.xeeshan16.enricher.kafka.OrderingMode;
+import io.github.xeeshan16.enricher.llm.http.AzureOpenAiProvider;
+import io.github.xeeshan16.enricher.llm.http.OpenAiCompatibleProvider.StructuredOutput;
+import io.github.xeeshan16.enricher.privacy.OutputPiiAction;
 import java.math.BigDecimal;
 import java.time.Duration;
 import java.util.Collections;
@@ -17,7 +20,10 @@ import org.springframework.core.io.Resource;
  * Configuration under {@code enricher.*}.
  *
  * @param autoStartup start the pipeline consumers with the application context
- * @param provider LLM provider to use when the application defines no {@code LlmProvider} bean
+ * @param provider LLM provider to use when the application defines no {@code LlmProvider} bean:
+ *     {@code fake}, {@code openai} (any OpenAI-compatible server, including Ollama and vLLM),
+ *     {@code anthropic} or {@code azure-openai}
+ * @param providers connection settings of the HTTP providers
  * @param delivery delivery guarantee towards the output topic
  * @param resilience timeout and in-place retries of each provider call
  * @param rateLimit provider quotas and adaptive concurrency
@@ -32,6 +38,7 @@ import org.springframework.core.io.Resource;
 public record EnricherProperties(
     @DefaultValue("true") boolean autoStartup,
     @DefaultValue("fake") String provider,
+    @DefaultValue Providers providers,
     @DefaultValue("auto") Delivery delivery,
     @DefaultValue Resilience resilience,
     @DefaultValue RateLimit rateLimit,
@@ -43,6 +50,7 @@ public record EnricherProperties(
     Map<String, Pipeline> pipelines) {
 
   public EnricherProperties {
+    providers = providers == null ? Providers.defaults() : providers;
     delivery = delivery == null ? Delivery.AUTO : delivery;
     resilience =
         resilience == null
@@ -64,7 +72,7 @@ public record EnricherProperties(
         ledger == null
             ? new Ledger(
                 LedgerStore.AUTO,
-                Duration.ofMinutes(2),
+                Duration.ofMinutes(4),
                 Duration.ofSeconds(2),
                 Duration.ofMillis(200),
                 Duration.ofMillis(500),
@@ -75,6 +83,121 @@ public record EnricherProperties(
     pipelines =
         pipelines == null ? Map.of() : Collections.unmodifiableMap(new LinkedHashMap<>(pipelines));
   }
+
+  /**
+   * Connection settings of the HTTP providers; only the one named by {@code enricher.provider} is
+   * used.
+   */
+  public record Providers(
+      @DefaultValue OpenAi openai,
+      @DefaultValue Anthropic anthropic,
+      @DefaultValue AzureOpenAi azureOpenai) {
+
+    static Providers defaults() {
+      return new Providers(null, null, null);
+    }
+
+    public Providers {
+      openai =
+          openai == null
+              ? new OpenAi(
+                  "https://api.openai.com/v1",
+                  null,
+                  StructuredOutput.JSON_SCHEMA,
+                  "0",
+                  false,
+                  Duration.ofSeconds(10),
+                  Duration.ofSeconds(60),
+                  null)
+              : openai;
+      anthropic =
+          anthropic == null
+              ? new Anthropic(
+                  "https://api.anthropic.com",
+                  null,
+                  "0",
+                  Duration.ofSeconds(10),
+                  Duration.ofSeconds(60),
+                  null)
+              : anthropic;
+      azureOpenai =
+          azureOpenai == null
+              ? new AzureOpenAi(
+                  null,
+                  null,
+                  AzureOpenAiProvider.DEFAULT_API_VERSION,
+                  StructuredOutput.JSON_SCHEMA,
+                  "0",
+                  Duration.ofSeconds(10),
+                  Duration.ofSeconds(60),
+                  null)
+              : azureOpenai;
+    }
+  }
+
+  /**
+   * An OpenAI-compatible Chat Completions server: OpenAI, Ollama ({@code
+   * http://localhost:11434/v1}), vLLM ({@code http://host:8000/v1}) or a gateway.
+   *
+   * @param baseUrl API root, up to and including {@code /v1}
+   * @param apiKey bearer token; leave empty for servers without authentication
+   * @param structuredOutput {@code json-schema}, {@code json-object} or {@code none}
+   * @param temperature sampling temperature, or {@code none} to leave it to the server
+   * @param maxCompletionTokens send {@code max_completion_tokens} instead of {@code max_tokens}
+   *     (OpenAI reasoning models)
+   * @param connectTimeout connect timeout
+   * @param requestTimeout limit for one HTTP exchange
+   * @param headers extra headers for every request
+   */
+  public record OpenAi(
+      @DefaultValue("https://api.openai.com/v1") String baseUrl,
+      String apiKey,
+      @DefaultValue("json-schema") StructuredOutput structuredOutput,
+      @DefaultValue("0") String temperature,
+      @DefaultValue("false") boolean maxCompletionTokens,
+      @DefaultValue("10s") Duration connectTimeout,
+      @DefaultValue("60s") Duration requestTimeout,
+      Map<String, String> headers) {}
+
+  /**
+   * The Anthropic Messages API.
+   *
+   * @param baseUrl API root, without {@code /v1}
+   * @param apiKey the {@code x-api-key} credential
+   * @param temperature sampling temperature, or {@code none} to leave it to the server
+   * @param connectTimeout connect timeout
+   * @param requestTimeout limit for one HTTP exchange
+   * @param headers extra headers for every request
+   */
+  public record Anthropic(
+      @DefaultValue("https://api.anthropic.com") String baseUrl,
+      String apiKey,
+      @DefaultValue("0") String temperature,
+      @DefaultValue("10s") Duration connectTimeout,
+      @DefaultValue("60s") Duration requestTimeout,
+      Map<String, String> headers) {}
+
+  /**
+   * Azure OpenAI. A pipeline's {@code model} is the deployment name.
+   *
+   * @param endpoint resource endpoint, for example {@code https://my-resource.openai.azure.com}
+   * @param apiKey the {@code api-key} credential
+   * @param apiVersion the {@code api-version} query parameter
+   * @param structuredOutput {@code json-schema}, {@code json-object} or {@code none}
+   * @param temperature sampling temperature, or {@code none} to leave it to the server
+   * @param connectTimeout connect timeout
+   * @param requestTimeout limit for one HTTP exchange
+   * @param headers extra headers for every request
+   */
+  public record AzureOpenAi(
+      String endpoint,
+      String apiKey,
+      @DefaultValue(AzureOpenAiProvider.DEFAULT_API_VERSION) String apiVersion,
+      @DefaultValue("json-schema") StructuredOutput structuredOutput,
+      @DefaultValue("0") String temperature,
+      @DefaultValue("10s") Duration connectTimeout,
+      @DefaultValue("60s") Duration requestTimeout,
+      Map<String, String> headers) {}
 
   /** Delivery guarantee towards the output and dead-letter topics. */
   public enum Delivery {
@@ -223,8 +346,9 @@ public record EnricherProperties(
    * The result ledger.
    *
    * @param store where results and leases are kept
-   * @param leaseTtl how long a worker may hold a key while calling the provider; keep it above
-   *     {@code callTimeout * maxAttempts} plus the back-off waits
+   * @param leaseTtl how long a worker may hold a key while calling the provider; keep it above the
+   *     worst case of the first call and every repair call, each {@code callTimeout * maxAttempts}
+   *     plus the rate limiter's {@code max-wait} per attempt and the back-off waits
    * @param busyWait how long one ledger claim waits in place for another worker's lease
    * @param pollInterval how often a waiting claim re-checks a busy key
    * @param busyRetryInterval pause between claims while a key stays busy; a record waits for about
@@ -235,7 +359,7 @@ public record EnricherProperties(
    */
   public record Ledger(
       @DefaultValue("auto") LedgerStore store,
-      @DefaultValue("2m") Duration leaseTtl,
+      @DefaultValue("4m") Duration leaseTtl,
       @DefaultValue("2s") Duration busyWait,
       @DefaultValue("200ms") Duration pollInterval,
       @DefaultValue("500ms") Duration busyRetryInterval,
@@ -285,6 +409,15 @@ public record EnricherProperties(
    * @param emitSkipped write a skipped envelope ({@code "enrichment": null}) for skipped records,
    *     so the output topic keeps one record per input; {@code false} writes nothing
    * @param budget per-tenant token and cost caps; none when left out
+   * @param maskPii personal data replaced with placeholders before the prompt is rendered: any of
+   *     {@code pan}, {@code iban}, {@code email}, {@code phone}, or {@code none}
+   * @param maskFields event fields replaced as a whole with {@code [REDACTED]}, as dot-separated
+   *     paths such as {@code customer.name}
+   * @param promptGuard prepend the injection guard to the system prompt
+   * @param outputPii personal data found in a validated answer: {@code mask}, {@code reject} (dead
+   *     letter as {@code PII_IN_OUTPUT}) or {@code allow}
+   * @param repairAttempts repair prompts sent for an answer that is not JSON or breaks the schema
+   *     (0 to 2); each one is a paid call
    */
   public record Pipeline(
       String inputTopic,
@@ -306,10 +439,18 @@ public record EnricherProperties(
       String tenant,
       Map<String, String> skip,
       @DefaultValue("true") boolean emitSkipped,
-      Budget budget) {
+      Budget budget,
+      @DefaultValue("pan,iban,email,phone") List<String> maskPii,
+      List<String> maskFields,
+      @DefaultValue("true") boolean promptGuard,
+      @DefaultValue("mask") OutputPiiAction outputPii,
+      @DefaultValue("1") int repairAttempts) {
 
     public Pipeline {
       skip = skip == null ? Map.of() : Collections.unmodifiableMap(new LinkedHashMap<>(skip));
+      maskPii = maskPii == null ? List.of("pan", "iban", "email", "phone") : List.copyOf(maskPii);
+      maskFields = maskFields == null ? List.of() : List.copyOf(maskFields);
+      outputPii = outputPii == null ? OutputPiiAction.MASK : outputPii;
     }
   }
 }

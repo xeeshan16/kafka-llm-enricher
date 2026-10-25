@@ -17,6 +17,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Properties;
+import java.util.concurrent.CopyOnWriteArrayList;
 import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.clients.consumer.KafkaConsumer;
@@ -39,8 +40,9 @@ import org.testcontainers.kafka.KafkaContainer;
 
 /**
  * End to end against a real broker and PostgreSQL, with Kafka transactions on: disputes in,
- * validated envelopes out, unusable answers to the dead-letter topic with a reason header, and a
- * re-published event answered from the result ledger without a second provider call.
+ * validated envelopes out, card numbers and emails masked before the prompt, an answer that breaks
+ * the schema fixed by one repair prompt, unusable answers to the dead-letter topic with a reason
+ * header, and a re-published event answered from the result ledger without a second provider call.
  */
 @SpringBootTest
 @Testcontainers
@@ -68,15 +70,30 @@ class DisputeTriagePipelineIT {
   @Autowired PipelineRunner runner;
   @Autowired ResultLedger ledger;
 
-  /** The default fake, except that events containing POISON get an answer that is not JSON. */
+  /** Every user prompt the provider received. */
+  static final List<String> PROMPTS = new CopyOnWriteArrayList<>();
+
+  /**
+   * The default fake, except that events containing POISON always get an answer that is not JSON,
+   * and events from Flaky Gadgets get an answer missing required fields unless it is a repair.
+   */
   @TestConfiguration
-  static class PoisonAwareProvider {
+  static class ScriptedProvider {
     @Bean
     FakeLlmProvider llmProvider() {
       SchemaAwareResponder responder = new SchemaAwareResponder();
       return new FakeLlmProvider(
-          req ->
-              req.userPrompt().contains("POISON") ? "Sorry, I cannot help." : responder.apply(req));
+          req -> {
+            PROMPTS.add(req.userPrompt());
+            if (req.userPrompt().contains("POISON")) {
+              return "Sorry, I cannot help.";
+            }
+            if (req.userPrompt().contains("Flaky Gadgets")
+                && !req.userPrompt().startsWith("Your previous answer")) {
+              return "{\"category\": \"product_not_received\"}";
+            }
+            return responder.apply(req);
+          });
     }
   }
 
@@ -93,10 +110,14 @@ class DisputeTriagePipelineIT {
                 + " refund the duplicate charge.\"}",
             "card-1002",
             "{\"disputeId\":\"D-1002\",\"merchant\":\"Northwind Electronics\",\"amount\":349.00,"
-                + "\"note\":\"I did not make this purchase, my card was used fraudulently.\"}",
+                + "\"note\":\"I did not make this purchase, my card 4111 1111 1111 1111 was used"
+                + " fraudulently. Reach me at jane.doe@example.com.\"}",
             "card-1003",
             "{\"disputeId\":\"D-1003\",\"merchant\":\"POISON Ltd\",\"amount\":5.00,"
-                + "\"note\":\"Test record that the model cannot answer.\"}");
+                + "\"note\":\"Test record that the model cannot answer.\"}",
+            "card-1004",
+            "{\"disputeId\":\"D-1004\",\"merchant\":\"Flaky Gadgets\",\"amount\":89.50,"
+                + "\"note\":\"I paid three weeks ago but the product was not received.\"}");
     try (KafkaProducer<String, String> producer = producer()) {
       for (Map.Entry<String, String> e : events.entrySet()) {
         producer.send(new ProducerRecord<>(INPUT, e.getKey(), e.getValue())).get();
@@ -108,16 +129,21 @@ class DisputeTriagePipelineIT {
     try (KafkaConsumer<String, String> consumer = consumer()) {
       consumer.subscribe(List.of(OUTPUT, DLQ));
       Instant deadline = Instant.now().plus(Duration.ofSeconds(90));
-      while ((enriched.size() < 2 || deadLettered.isEmpty()) && Instant.now().isBefore(deadline)) {
+      while ((enriched.size() < 3 || deadLettered.isEmpty()) && Instant.now().isBefore(deadline)) {
         for (ConsumerRecord<String, String> r : consumer.poll(Duration.ofMillis(500))) {
           (r.topic().equals(OUTPUT) ? enriched : deadLettered).add(r);
         }
       }
 
-      assertThat(enriched).hasSize(2);
+      assertThat(enriched).hasSize(3);
       assertThat(deadLettered).hasSize(1);
       long callsBeforeReplay = provider.calls();
-      assertThat(callsBeforeReplay).isEqualTo(3);
+      // One call each for D-1001 and D-1002; a call and a repair call each for D-1003 (still not
+      // JSON, dead-lettered) and D-1004 (fixed by the repair).
+      assertThat(callsBeforeReplay).isEqualTo(6);
+      // Personal data never reached the provider; the placeholders did.
+      assertThat(PROMPTS).noneMatch(p -> p.contains("4111") || p.contains("jane.doe@example.com"));
+      assertThat(PROMPTS).anyMatch(p -> p.contains("[PAN_1]") && p.contains("[EMAIL_1]"));
 
       // Re-publish the first dispute with its fields in another order: same canonical input, so
       // the ledger answers it and no provider call is made.
@@ -148,7 +174,7 @@ class DisputeTriagePipelineIT {
     for (ConsumerRecord<String, String> r : enriched) {
       JsonNode envelope = MAPPER.readTree(r.value());
       assertThat(envelope.path("pipeline").asText()).isEqualTo("dispute-triage");
-      assertThat(envelope.path("promptVersion").asText()).isEqualTo("v1");
+      assertThat(envelope.path("promptVersion").asText()).isEqualTo("v2");
       assertThat(envelope.path("source").path("topic").asText()).isEqualTo(INPUT);
       assertThat(envelope.path("source").path("key").asText()).isEqualTo(r.key());
       assertThat(envelope.path("inputHash").asText()).startsWith("sha256:");
@@ -163,6 +189,9 @@ class DisputeTriagePipelineIT {
     }
     assertThat(categoryOf(enriched, "card-1001")).isEqualTo("duplicate_charge");
     assertThat(categoryOf(enriched, "card-1002")).isEqualTo("fraud");
+    assertThat(categoryOf(enriched, "card-1004")).isEqualTo("product_not_received");
+    // The envelope keeps the original event, for consumers with access to the input topic.
+    assertThat(valueOf(enriched, "card-1002")).contains("4111 1111 1111 1111");
 
     ConsumerRecord<String, String> dead = deadLettered.getFirst();
     assertThat(dead.key()).isEqualTo("card-1003");
