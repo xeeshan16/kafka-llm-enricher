@@ -119,3 +119,33 @@
 - Metrics export of the new counters (`UsageAccounting`, `ProviderRateLimiter.stats()`) is day 6, together with the rest of the Micrometer and OpenTelemetry work.
 
 **Next (day 5):** JSON Schema repair prompt, PII masking before the prompt, the written threat model, and real providers (OpenAI-compatible including Ollama and vLLM, Anthropic, Azure OpenAI) behind the interface, with 429s mapped to `LlmThrottledException`.
+
+## Day 5 (2026-10-25): output quality and safety
+
+**Built**
+
+- `enricher-core`
+  - `privacy`: `PiiDetector` (extension point), `PiiDetectors` (PAN with issuer range and Luhn, IBAN with mod 97 and trailing-word handling, email, international and North American phone numbers), `PiiMasker` (detectors plus whole-field redaction by path, stable per-record placeholders such as `[PAN_1]`, card numbers sent as JSON numbers too), `PromptSafety` (masker, injection guard, `OutputPiiAction`).
+  - `Enricher` renders the prompt from a masked copy of the event and key and prepends the guard; the hash, skip rules and envelope keep the original. Validated answers are scanned: mask and re-validate, reject as `PII_IN_OUTPUT`, or allow. `repairRequest` quotes the rejected answer and errors as escaped JSON strings.
+  - `PipelineDefinition` gains `safety` and `repairAttempts` (0 to 2); the old constructor keeps the previous behaviour. `LedgeredEnricher` runs the repair loop inside the ledger lease, budgets and meters each repair, sums usage into the envelope and ledger entry, and keeps the original failure when a repair cannot be made.
+  - `llm.http`: `HttpLlmProvider` (status mapping, `Retry-After` / `retry-after-ms` / HTTP dates capped at 10 min, short error messages, key never printed, no redirects), `OpenAiCompatibleProvider` (OpenAI, Ollama, vLLM; `json_schema`, JSON mode or prompt-only schema), `AzureOpenAiProvider`, `AnthropicProvider` (529 as throttling).
+  - `UsageMeter.repairAttempt` / `piiMasked`, `UsageAccounting.quality`.
+- `enricher-spring-boot-starter`: `enricher.provider` = `openai` / `anthropic` / `azure-openai` with `enricher.providers.*` (`ProviderFactory`; hosted providers fail startup without credentials); per pipeline `mask-pii`, `mask-fields`, `prompt-guard`, `output-pii`, `repair-attempts`. Default lease 4 min; the lease warning covers repair calls.
+- `enricher-app`: provider settings from environment variables only; the demo pipeline is masked, guarded and moved to prompt version `v2`.
+- Tests: `PiiMaskerTest` (11), `EnricherSafetyAndRepairTest` (9), `LedgeredEnricherRepairTest` (3), `HttpProvidersTest` (12, against a local `com.sun.net.httpserver` stub), new auto-configuration tests for providers and safety settings; `DisputeTriagePipelineIT` extended with masking and repair.
+- Docs: [THREAT-MODEL.md](THREAT-MODEL.md), [ADR 0005](adr/0005-mask-before-the-prompt-repair-after-the-answer.md), README sections on connecting real models, masking and repair.
+
+**Verified**
+
+- In CI on `dev`: run [40196149410](https://github.com/xeeshan16/kafka-llm-enricher/actions/runs/40196149410) green for `b7e36c8` (format, Error Prone, unit and all Testcontainers tests). The first push (`15a605c`, run [40196005593](https://github.com/xeeshan16/kafka-llm-enricher/actions/runs/40196005593)) failed in the starter tests: a single `@DefaultValue` string is not split into list elements, so the default `mask-pii` bound as one unknown name. Fixed in `b7e36c8`.
+- `DisputeTriagePipelineIT` (same run): no prompt contained the test card number or email, the placeholders were sent; D-1004 was fixed by one repair (2 calls, usage of both in the envelope); D-1003 was dead-lettered as `INVALID_JSON` after its repair; 6 calls for 4 disputes, 0 for the replay.
+- The chaos, concurrency and cost tests still pass with masking, guard and repair on (the cost test turns the guard off, see below): chaos 40 committed envelopes and 1 call per input; cost outcomes identical to day 4 (acme spend 10,735 of 12,000 micro-USD).
+- Locally (Maven Central is blocked in the build workspace): the core module's 127 unit tests, including all new ones, against distro jars with a stub schema validator; formatting with google-java-format 1.35.0 (`--skip-reflowing-long-strings`, matching Spotless). The starter and integration tests ran in CI only. No hosted model was called anywhere.
+
+**Notes and plan adjustments**
+
+- `CostControlIT` sets `prompt-guard=false` for its `costed` pipeline: its caps are sized for a short prompt, and the guard's ~160 extra input tokens per call (four-characters-per-token estimate) could change which calls fit under the cap. The guard is covered by the other tests.
+- The default ledger lease went from 2 to 4 minutes so that a call plus one repair (2 x 115 s worst case with default settings) fits in one lease.
+- Prompt injection is mitigated (escaping, guard, schema, no tools), not solved; the threat model says so and lists what operators must do.
+
+**Next (day 6):** Micrometer metrics and OpenTelemetry traces (Kafka record to LLM span, GenAI semantic conventions) including the new repair and masking counters, a Grafana dashboard, the Docker image built and smoke-tested in CI, a `docker compose up` demo, a Helm chart and `jitpack.yml`.

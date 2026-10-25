@@ -7,6 +7,22 @@ All notable changes to this project are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- PII masking before the prompt (`mask-pii`, `mask-fields`): `PiiMasker` with checked detectors for
+  card numbers (issuer range and Luhn), IBANs (mod 97), emails and phone numbers, whole-field
+  redaction by path, stable per-record placeholders (`[PAN_1]`), and `PiiDetector` as the extension
+  point for custom identifiers. The record key is masked too.
+- Injection guard (`prompt-guard`, on by default) prepended to the system prompt, and `output-pii`
+  (`mask`, `reject`, `allow`) for personal data found in answers. New failure reason
+  `PII_IN_OUTPUT`.
+- Schema repair prompts (`repair-attempts`, 0 to 2, default 1 in the starter) for `INVALID_JSON`
+  and `SCHEMA_VIOLATION`, budgeted and metered like any call; envelope and ledger usage include
+  every call. `UsageMeter.repairAttempt` / `piiMasked` and `UsageAccounting.quality`.
+- Real providers in `enricher-core` on the JDK HTTP client: `OpenAiCompatibleProvider` (OpenAI,
+  Ollama, vLLM, gateways; `json_schema`, JSON mode or prompt-only schema), `AnthropicProvider`
+  (Messages API, 529 treated as throttling) and `AzureOpenAiProvider` (deployment URL,
+  `api-version`, `api-key`), all mapping 429 to `LlmThrottledException` with `Retry-After`.
+  Configured with `enricher.provider` and `enricher.providers.*`.
+- [Threat model](docs/THREAT-MODEL.md) and ADR 0005.
 - Provider rate limiting (`enricher.rate-limit.*`): requests-per-minute and tokens-per-minute token
   buckets plus an AIMD concurrency limit that halves on 429s and honours `Retry-After`.
   `ProviderRateLimiter`, `RateLimitedLlmProvider` and `LlmThrottledException` for provider adapters.
@@ -58,6 +74,11 @@ All notable changes to this project are documented here. The format follows
   Testcontainers Kafka integration test.
 
 ### Changed
+- The default `enricher.ledger.lease-ttl` is 4 minutes (was 2), and the lease warning covers the
+  first call plus every repair call.
+- The demo `dispute-triage` pipeline uses prompt version `v2`: its prompt is now masked and guarded.
+- `enricher.provider` accepts `openai`, `anthropic` and `azure-openai`; hosted providers fail
+  startup without credentials.
 - `EnrichmentOutcome` gains `Skipped` and `Deferred`; `LedgeredEnricher.Result` carries the tenant.
 - The enricher calls the provider through `ResilientLlmProvider(RateLimitedLlmProvider(provider))`.
 - The ledger lease warning includes rate-limiter waits.
