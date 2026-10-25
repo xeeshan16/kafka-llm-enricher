@@ -440,7 +440,7 @@ public record EnricherProperties(
       Map<String, String> skip,
       @DefaultValue("true") boolean emitSkipped,
       Budget budget,
-      @DefaultValue("pan,iban,email,phone") List<String> maskPii,
+      @DefaultValue({"pan", "iban", "email", "phone"}) List<String> maskPii,
       List<String> maskFields,
       @DefaultValue("true") boolean promptGuard,
       @DefaultValue("mask") OutputPiiAction outputPii,

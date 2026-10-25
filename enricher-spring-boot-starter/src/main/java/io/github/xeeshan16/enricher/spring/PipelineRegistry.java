@@ -20,6 +20,7 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 
 /**
  * The validated pipelines of this application, built once from {@link EnricherProperties}.
@@ -157,10 +158,16 @@ public final class PipelineRegistry {
   /** Masking, guard and answer handling from {@code mask-pii}, {@code mask-fields} and friends. */
   static PromptSafety safety(EnricherProperties.Pipeline p) {
     List<PiiDetector> detectors = new ArrayList<>();
-    for (String name : new LinkedHashSet<>(p.maskPii())) {
-      if (name.isBlank() || name.strip().equalsIgnoreCase("none")) {
-        continue;
+    Set<String> names = new LinkedHashSet<>();
+    for (String entry : p.maskPii()) {
+      // A single default or YAML value may still hold a comma-separated list.
+      for (String name : entry.split(",", -1)) {
+        if (!name.isBlank() && !name.strip().equalsIgnoreCase("none")) {
+          names.add(name.strip());
+        }
       }
+    }
+    for (String name : names) {
       detectors.add(PiiDetectors.named(name));
     }
     PiiMasker masker =
