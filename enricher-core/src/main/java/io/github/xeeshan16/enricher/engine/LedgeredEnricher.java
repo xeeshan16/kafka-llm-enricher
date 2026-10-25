@@ -13,6 +13,7 @@ import io.github.xeeshan16.enricher.ledger.LedgerBusyException;
 import io.github.xeeshan16.enricher.ledger.LedgerEntry;
 import io.github.xeeshan16.enricher.ledger.LedgerKey;
 import io.github.xeeshan16.enricher.ledger.ResultLedger;
+import io.github.xeeshan16.enricher.llm.LlmRequest;
 import io.github.xeeshan16.enricher.llm.LlmResponse;
 import io.github.xeeshan16.enricher.llm.TokenEstimator;
 import io.github.xeeshan16.enricher.llm.TokenUsage;
@@ -173,6 +174,7 @@ public final class LedgeredEnricher {
   public Result process(PipelineDefinition pipeline, InputRecord record, CostPolicy policy) {
     PreparedRecord prepared = enricher.prepare(pipeline, record);
     String tenant = policy.tenants().tenantOf(prepared);
+    prepared.masked().forEach((label, count) -> meter.piiMasked(pipeline.name(), label, count));
     for (SkipRule rule : policy.skipRules()) {
       if (matches(rule, prepared)) {
         return skip(prepared, tenant, "rule:" + rule.name());
@@ -308,6 +310,19 @@ public final class LedgeredEnricher {
     EnrichmentOutcome outcome;
     try {
       outcome = enricher.interpret(prepared, response);
+      for (int i = 0;
+          i < prepared.pipeline().repairAttempts() && Enricher.isRepairable(outcome);
+          i++) {
+        EnrichmentOutcome.Failed failed = (EnrichmentOutcome.Failed) outcome;
+        LlmResponse repaired = repair(prepared, failed, key, tenant, budgets);
+        if (repaired == null) {
+          break;
+        }
+        response = Enricher.combine(response, repaired);
+        outcome = enricher.interpret(prepared, response);
+        meter.repairAttempt(
+            prepared.pipeline().name(), tenant, key.model(), !Enricher.isRepairable(outcome));
+      }
     } catch (RuntimeException e) {
       releaseQuietly(key, token);
       throw e;
@@ -331,6 +346,53 @@ public final class LedgeredEnricher {
         return new Result(outcome, ResultSource.PROVIDER, tenant);
       }
     }
+  }
+
+  /**
+   * Sends one repair prompt, paid for and budgeted like the first call. Returns {@code null} when
+   * the repair could not be made: the tenant's budget has no room for it, or the provider failed. A
+   * failed repair does not throw, because the record would then be retried from the start and the
+   * first answer paid for again; the record keeps its original failure instead.
+   */
+  private LlmResponse repair(
+      PreparedRecord prepared,
+      EnrichmentOutcome.Failed failed,
+      LedgerKey key,
+      String tenant,
+      BudgetGuard budgets) {
+    String pipeline = prepared.pipeline().name();
+    LlmRequest request = enricher.repairRequest(prepared, failed);
+    BudgetDecision.Granted grant = null;
+    if (budgets != null) {
+      BudgetDecision decision =
+          budgets.reserve(pipeline, tenant, key.model(), TokenEstimator.estimate(request));
+      if (decision instanceof BudgetDecision.Denied) {
+        log.debug("pipeline={} tenant={} no budget left for a repair of {}", pipeline, tenant, key);
+        return null;
+      }
+      grant = (BudgetDecision.Granted) decision;
+    }
+    LlmResponse repaired;
+    try {
+      repaired = enricher.provider().complete(request);
+    } catch (RuntimeException e) {
+      if (grant != null) {
+        refundQuietly(budgets, grant);
+      }
+      log.warn(
+          "pipeline={} repair call for {} failed; keeping the original {}: {}",
+          pipeline,
+          key,
+          failed.reason(),
+          e.toString());
+      meter.repairAttempt(pipeline, tenant, key.model(), false);
+      return null;
+    }
+    meter.providerCall(pipeline, tenant, key.model(), repaired.usage());
+    if (grant != null) {
+      settleQuietly(budgets, grant, repaired.usage());
+    }
+    return repaired;
   }
 
   private void settleQuietly(BudgetGuard budgets, BudgetDecision.Granted grant, TokenUsage usage) {

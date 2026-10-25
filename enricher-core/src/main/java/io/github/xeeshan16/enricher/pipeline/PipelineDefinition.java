@@ -1,5 +1,6 @@
 package io.github.xeeshan16.enricher.pipeline;
 
+import io.github.xeeshan16.enricher.privacy.PromptSafety;
 import io.github.xeeshan16.enricher.schema.OutputSchema;
 import java.util.Objects;
 
@@ -18,6 +19,9 @@ import java.util.Objects;
  * @param userTemplate the user prompt template
  * @param outputSchema the schema the answer must satisfy
  * @param maxOutputTokens output token cap per call
+ * @param safety PII masking, the injection guard and the handling of personal data in answers
+ * @param repairAttempts how many repair prompts to send when an answer is not valid JSON or breaks
+ *     the schema (0 to 2); each is a paid call
  */
 public record PipelineDefinition(
     String name,
@@ -29,7 +33,39 @@ public record PipelineDefinition(
     String systemPrompt,
     PromptTemplate userTemplate,
     OutputSchema outputSchema,
-    int maxOutputTokens) {
+    int maxOutputTokens,
+    PromptSafety safety,
+    int repairAttempts) {
+
+  /** Highest supported {@code repairAttempts}. */
+  public static final int MAX_REPAIR_ATTEMPTS = 2;
+
+  /** A pipeline without masking, guard or repair. */
+  public PipelineDefinition(
+      String name,
+      String inputTopic,
+      String outputTopic,
+      String deadLetterTopic,
+      String promptVersion,
+      String model,
+      String systemPrompt,
+      PromptTemplate userTemplate,
+      OutputSchema outputSchema,
+      int maxOutputTokens) {
+    this(
+        name,
+        inputTopic,
+        outputTopic,
+        deadLetterTopic,
+        promptVersion,
+        model,
+        systemPrompt,
+        userTemplate,
+        outputSchema,
+        maxOutputTokens,
+        PromptSafety.NONE,
+        0);
+  }
 
   public PipelineDefinition {
     requireText(name, "name");
@@ -48,6 +84,11 @@ public record PipelineDefinition(
       throw new IllegalArgumentException(
           "pipeline '" + name + "' must not write to its own input topic " + inputTopic);
     }
+    Objects.requireNonNull(safety, "safety");
+    if (repairAttempts < 0 || repairAttempts > MAX_REPAIR_ATTEMPTS) {
+      throw new IllegalArgumentException(
+          "repairAttempts must be between 0 and " + MAX_REPAIR_ATTEMPTS + ": " + repairAttempts);
+    }
   }
 
   /**
@@ -65,7 +106,43 @@ public record PipelineDefinition(
         systemPrompt,
         userTemplate,
         outputSchema,
-        maxOutputTokens);
+        maxOutputTokens,
+        safety,
+        repairAttempts);
+  }
+
+  /** The same pipeline with other safety settings. */
+  public PipelineDefinition withSafety(PromptSafety otherSafety) {
+    return new PipelineDefinition(
+        name,
+        inputTopic,
+        outputTopic,
+        deadLetterTopic,
+        promptVersion,
+        model,
+        systemPrompt,
+        userTemplate,
+        outputSchema,
+        maxOutputTokens,
+        otherSafety,
+        repairAttempts);
+  }
+
+  /** The same pipeline with another number of repair attempts. */
+  public PipelineDefinition withRepairAttempts(int attempts) {
+    return new PipelineDefinition(
+        name,
+        inputTopic,
+        outputTopic,
+        deadLetterTopic,
+        promptVersion,
+        model,
+        systemPrompt,
+        userTemplate,
+        outputSchema,
+        maxOutputTokens,
+        safety,
+        attempts);
   }
 
   private static void requireText(String value, String field) {

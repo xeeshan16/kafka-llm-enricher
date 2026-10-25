@@ -27,6 +27,15 @@ public interface UsageMeter {
   /** A record was routed to the fallback model because its tenant was over budget. */
   void downgraded(String pipeline, String tenant, String fromModel, String toModel);
 
+  /**
+   * A repair prompt was sent for an unusable answer; {@code fixed} tells whether the repaired
+   * answer was valid. The repair call itself is also reported through {@link #providerCall}.
+   */
+  default void repairAttempt(String pipeline, String tenant, String model, boolean fixed) {}
+
+  /** Personal data was masked in a prompt: {@code count} distinct values of type {@code label}. */
+  default void piiMasked(String pipeline, String label, int count) {}
+
   UsageMeter NOOP =
       new UsageMeter() {
         @Override

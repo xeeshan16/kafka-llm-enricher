@@ -89,6 +89,14 @@ public final class PromptTemplate {
     };
   }
 
+  /**
+   * A value as compact JSON with {@code <} escaped, the form in which untrusted text is placed into
+   * prompts.
+   */
+  public static String jsonText(JsonNode node) {
+    return json(node);
+  }
+
   /** Compact JSON with {@code <} escaped so the text can never contain a closing marker. */
   static String json(JsonNode node) {
     try {

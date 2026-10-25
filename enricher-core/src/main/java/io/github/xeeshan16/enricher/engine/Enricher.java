@@ -11,13 +11,18 @@ import io.github.xeeshan16.enricher.llm.LlmResponse;
 import io.github.xeeshan16.enricher.llm.TokenUsage;
 import io.github.xeeshan16.enricher.pipeline.InputRecord;
 import io.github.xeeshan16.enricher.pipeline.PipelineDefinition;
+import io.github.xeeshan16.enricher.pipeline.PromptTemplate;
+import io.github.xeeshan16.enricher.privacy.OutputPiiAction;
+import io.github.xeeshan16.enricher.privacy.PiiMasker;
+import io.github.xeeshan16.enricher.privacy.PromptSafety;
 import java.time.Duration;
 import java.util.List;
 import java.util.Objects;
+import java.util.Set;
 
 /**
- * Enriches one record: parse, render the prompt, call the model, extract and validate the JSON
- * answer, and build the output envelope.
+ * Enriches one record: parse, mask personal data, render the prompt, call the model, extract and
+ * validate the JSON answer (with an optional repair prompt), and build the output envelope.
  *
  * <p>This class does no I/O besides the provider call and holds no per-record state, so one
  * instance serves every pipeline and thread. Provider failures propagate as {@link
@@ -35,6 +40,7 @@ public final class Enricher {
   public static final String ENVELOPE_FORMAT = "kafka-llm-enricher/v1";
 
   private static final int MAX_DETAIL_ERRORS = 5;
+  private static final int MAX_REPAIR_ECHO_CHARS = 4000;
 
   private final LlmProvider provider;
   private final ObjectMapper mapper;
@@ -66,12 +72,20 @@ public final class Enricher {
   }
 
   /**
-   * Enriches one record with one provider call. Equivalent to {@link #prepare} followed by a
-   * provider call and {@link #interpret}.
+   * Enriches one record: {@link #prepare}, a provider call and {@link #interpret}, then up to the
+   * pipeline's {@code repairAttempts} repair calls while the answer is unusable.
    */
   public EnrichmentOutcome enrich(PipelineDefinition pipeline, InputRecord record) {
     PreparedRecord prepared = prepare(pipeline, record);
-    return interpret(prepared, provider.complete(prepared.request()));
+    LlmResponse response = provider.complete(prepared.request());
+    EnrichmentOutcome outcome = interpret(prepared, response);
+    for (int i = 0; i < pipeline.repairAttempts() && isRepairable(outcome); i++) {
+      LlmResponse repaired =
+          provider.complete(repairRequest(prepared, (EnrichmentOutcome.Failed) outcome));
+      response = combine(response, repaired);
+      outcome = interpret(prepared, response);
+    }
+    return outcome;
   }
 
   /**
@@ -81,15 +95,77 @@ public final class Enricher {
   public PreparedRecord prepare(PipelineDefinition pipeline, InputRecord record) {
     JsonNode input = parseValue(record.value());
     String inputHash = CanonicalJson.sha256(input);
-    String userPrompt = pipeline.userTemplate().render(input, record.key(), record.topic());
+    PromptSafety safety = pipeline.safety();
+    PiiMasker.Masked masked = safety.masker().mask(input);
+    String key = record.key() == null ? null : safety.masker().maskText(record.key());
+    String userPrompt = pipeline.userTemplate().render(masked.value(), key, record.topic());
     LlmRequest request =
         new LlmRequest(
             pipeline.model(),
-            pipeline.systemPrompt(),
+            safety.systemPrompt(pipeline.systemPrompt()),
             userPrompt,
             pipeline.outputSchema().node(),
             pipeline.maxOutputTokens());
-    return new PreparedRecord(pipeline, record, input, inputHash, request);
+    return new PreparedRecord(pipeline, record, input, inputHash, request, masked.counts());
+  }
+
+  /**
+   * Whether a repair prompt can fix {@code outcome}: the answer was not JSON or broke the schema.
+   */
+  public static boolean isRepairable(EnrichmentOutcome outcome) {
+    return outcome instanceof EnrichmentOutcome.Failed f
+        && (f.reason() == FailureReason.INVALID_JSON
+            || f.reason() == FailureReason.SCHEMA_VIOLATION);
+  }
+
+  /**
+   * The follow-up request for an unusable answer: the original task, the rejected answer and what
+   * was wrong with it, and the instruction to return a corrected object only.
+   *
+   * <p>The rejected answer and the error messages are untrusted (the answer may echo event text),
+   * so both are written as JSON strings with {@code <} escaped, like event content, and cannot
+   * close the {@code <event>} block of the original prompt.
+   */
+  public LlmRequest repairRequest(PreparedRecord prepared, EnrichmentOutcome.Failed failed) {
+    LlmRequest original = prepared.request();
+    String previous = failed.response() == null ? "" : failed.response().text();
+    String userPrompt =
+        "Your previous answer to the task below was rejected because "
+            + (failed.reason() == FailureReason.INVALID_JSON
+                ? "it is not a single valid JSON object"
+                : "it does not satisfy the response schema")
+            + ".\nProblems (JSON string): "
+            + quoted(failed.detail() == null ? "" : failed.detail())
+            + "\nRejected answer (JSON string): "
+            + quoted(truncate(previous, MAX_REPAIR_ECHO_CHARS))
+            + "\nReturn only the corrected JSON object. The original task follows.\n\n"
+            + original.userPrompt();
+    return new LlmRequest(
+        original.model(),
+        original.systemPrompt(),
+        userPrompt,
+        original.responseSchema(),
+        original.maxOutputTokens());
+  }
+
+  /**
+   * One response standing for an original call and its repair: the repair's text and model, the
+   * usage and latency of both, since both were paid for.
+   */
+  public static LlmResponse combine(LlmResponse first, LlmResponse repair) {
+    return new LlmResponse(
+        repair.text(),
+        repair.model(),
+        first.usage().plus(repair.usage()),
+        first.latency().plus(repair.latency()));
+  }
+
+  private String quoted(String text) {
+    return PromptTemplate.jsonText(mapper.getNodeFactory().textNode(text));
+  }
+
+  private static String truncate(String text, int max) {
+    return text.length() <= max ? text : text.substring(0, max) + "...";
   }
 
   /** Extracts and validates the answer in {@code response} and builds the envelope. */
@@ -110,13 +186,37 @@ public final class Enricher {
     }
     List<String> errors = pipeline.outputSchema().validate(enrichment);
     if (!errors.isEmpty()) {
-      String detail =
-          String.join("; ", errors.subList(0, Math.min(errors.size(), MAX_DETAIL_ERRORS)));
-      return new EnrichmentOutcome.Failed(
-          inputHash, FailureReason.SCHEMA_VIOLATION, detail, response);
+      return schemaViolation(inputHash, errors, response);
+    }
+    PromptSafety safety = pipeline.safety();
+    if (safety.outputPii() != OutputPiiAction.ALLOW && !safety.masker().detectors().isEmpty()) {
+      PiiMasker detectorsOnly = new PiiMasker(safety.masker().detectors(), Set.of());
+      PiiMasker.Masked scanned = detectorsOnly.mask(enrichment);
+      if (scanned.total() > 0) {
+        if (safety.outputPii() == OutputPiiAction.REJECT) {
+          return new EnrichmentOutcome.Failed(
+              inputHash,
+              FailureReason.PII_IN_OUTPUT,
+              "answer contains personal data: " + scanned.counts(),
+              response);
+        }
+        enrichment = scanned.value();
+        errors = pipeline.outputSchema().validate(enrichment);
+        if (!errors.isEmpty()) {
+          return schemaViolation(inputHash, errors, response);
+        }
+      }
     }
     return fromStored(
         prepared, CanonicalJson.write(enrichment), response.model(), response.usage(), response);
+  }
+
+  private static EnrichmentOutcome.Failed schemaViolation(
+      String inputHash, List<String> errors, LlmResponse response) {
+    String detail =
+        String.join("; ", errors.subList(0, Math.min(errors.size(), MAX_DETAIL_ERRORS)));
+    return new EnrichmentOutcome.Failed(
+        inputHash, FailureReason.SCHEMA_VIOLATION, detail, response);
   }
 
   /**

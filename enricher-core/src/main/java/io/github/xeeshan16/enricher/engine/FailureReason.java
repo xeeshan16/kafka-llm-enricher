@@ -6,6 +6,11 @@ public enum FailureReason {
   INVALID_JSON,
   /** The answer was JSON but did not satisfy the pipeline's output schema. */
   SCHEMA_VIOLATION,
+  /**
+   * The answer contained personal data and the pipeline's {@code output-pii} action is {@code
+   * reject}.
+   */
+  PII_IN_OUTPUT,
   /** The provider failed with a non-retryable error (bad request, authentication). */
   PROVIDER_ERROR,
   /**

@@ -52,6 +52,23 @@ public final class UsageAccounting implements UsageMeter {
     final LongAdder downgraded = new LongAdder();
   }
 
+  /**
+   * Answer quality and privacy counters of one pipeline.
+   *
+   * @param repairs repair prompts sent
+   * @param repaired repair prompts that produced a valid answer
+   * @param masked distinct values masked in prompts, by detector label
+   */
+  public record Quality(long repairs, long repaired, Map<String, Long> masked) {
+    public Quality {
+      masked = Map.copyOf(masked);
+    }
+  }
+
+  private final Map<String, LongAdder> repairs = new ConcurrentHashMap<>();
+  private final Map<String, LongAdder> repaired = new ConcurrentHashMap<>();
+  private final Map<String, LongAdder> masked = new ConcurrentHashMap<>();
+
   private final PriceTable prices;
   private final Map<Key, Counters> counters = new ConcurrentHashMap<>();
   private final Map<String, LongAdder> skipReasons = new ConcurrentHashMap<>();
@@ -95,6 +112,36 @@ public final class UsageAccounting implements UsageMeter {
   @Override
   public void downgraded(String pipeline, String tenant, String fromModel, String toModel) {
     counters(pipeline, tenant, toModel).downgraded.increment();
+  }
+
+  @Override
+  public void repairAttempt(String pipeline, String tenant, String model, boolean fixed) {
+    repairs.computeIfAbsent(pipeline, k -> new LongAdder()).increment();
+    if (fixed) {
+      repaired.computeIfAbsent(pipeline, k -> new LongAdder()).increment();
+    }
+  }
+
+  @Override
+  public void piiMasked(String pipeline, String label, int count) {
+    masked.computeIfAbsent(pipeline + "\u0000" + label, k -> new LongAdder()).add(count);
+  }
+
+  /** Repair and masking counters of {@code pipeline}. */
+  public Quality quality(String pipeline) {
+    Map<String, Long> byLabel = new java.util.TreeMap<>();
+    String prefix = pipeline + "\u0000";
+    masked.forEach(
+        (k, v) -> {
+          if (k.startsWith(prefix)) {
+            byLabel.put(k.substring(prefix.length()), v.sum());
+          }
+        });
+    return new Quality(sum(repairs.get(pipeline)), sum(repaired.get(pipeline)), byLabel);
+  }
+
+  private static long sum(LongAdder adder) {
+    return adder == null ? 0 : adder.sum();
   }
 
   /** Every line, sorted by pipeline, tenant and model. */
