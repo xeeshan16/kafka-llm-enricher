@@ -1,6 +1,9 @@
 spring:
   application:
     name: kafka-llm-enricher
+  threads:
+    virtual:
+      enabled: true
   kafka:
     bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
     consumer:
@@ -27,12 +30,51 @@ spring:
   flyway:
     enabled: false
 
+server:
+  port: ${SERVER_PORT:8080}
+  shutdown: graceful
+
+# Health probes (/actuator/health/liveness, /readiness), Prometheus scrape (/actuator/prometheus)
+# and OpenTelemetry traces. Traces are exported over OTLP only when an endpoint is set, for
+# example MANAGEMENT_OTLP_TRACING_ENDPOINT=http://otel-collector:4318/v1/traces.
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus,metrics
+  endpoint:
+    health:
+      probes:
+        enabled: true
+      show-details: ${ENRICHER_HEALTH_DETAILS:always}
+      group:
+        # A dead consumer loop does not come back by itself: let Kubernetes restart the pod.
+        liveness:
+          include: livenessState,enricher
+  metrics:
+    tags:
+      application: ${spring.application.name}
+    distribution:
+      percentiles-histogram:
+        gen_ai.client.operation: true
+        enricher.record.process: true
+  tracing:
+    sampling:
+      probability: ${ENRICHER_TRACE_SAMPLING:0.1}
+  observations:
+    key-values:
+      deployment.environment: ${ENRICHER_ENVIRONMENT:local}
+
 enricher:
   auto-startup: ${ENRICHER_AUTO_STARTUP:true}
   # fake (offline, deterministic), openai (OpenAI, Ollama, vLLM or any OpenAI-compatible server),
   # anthropic or azure-openai. Keys come from the environment only.
   provider: ${ENRICHER_PROVIDER:fake}
   providers:
+    fake:
+      # Simulated model latency for demos and load tests (the default fake answers instantly).
+      latency: ${ENRICHER_FAKE_LATENCY:0ms}
+      latency-jitter: ${ENRICHER_FAKE_LATENCY_JITTER:0ms}
     openai:
       # Ollama: http://localhost:11434/v1 (no key). vLLM: http://<host>:8000/v1.
       base-url: ${ENRICHER_OPENAI_BASE_URL:https://api.openai.com/v1}
@@ -65,11 +107,21 @@ enricher:
     max-wait: ${ENRICHER_RATE_LIMIT_MAX_WAIT:5s}
     initial-concurrency: 16
     max-concurrency: ${ENRICHER_MAX_PROVIDER_CONCURRENCY:64}
-  # USD per million tokens, for cost metrics and cost budgets. The fake provider is free.
+  # USD per million tokens, for cost metrics and cost budgets. The fake provider is free (the
+  # demo profile gives it illustrative prices).
   pricing:
     fake-1:
       input-per-million: 0
       output-per-million: 0
+  # Tenant tags on cost, token and ledger metrics, bounded so many merchants stay cheap to scrape.
+  metrics:
+    tenant-tag: ${ENRICHER_METRICS_TENANT_TAG:true}
+    max-tenants: ${ENRICHER_METRICS_MAX_TENANTS:100}
+  # Synthetic dispute stream (DisputeGenerator); on in the demo profile.
+  demo:
+    generator:
+      enabled: false
+      topic: payments.disputes
   ledger:
     store: ${ENRICHER_LEDGER_STORE:auto}
     # Covers the first call and one repair call, each with retries (see README).

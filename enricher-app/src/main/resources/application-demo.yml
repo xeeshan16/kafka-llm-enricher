@@ -1,0 +1,42 @@
+# Profile "demo" (docker compose): a synthetic dispute stream, simulated model latency,
+# illustrative prices and cost controls that trigger within minutes, so every dashboard panel has
+# data. Latencies and prices here are made up; they are not measurements of any real model.
+enricher:
+  providers:
+    fake:
+      latency: ${ENRICHER_FAKE_LATENCY:150ms}
+      latency-jitter: ${ENRICHER_FAKE_LATENCY_JITTER:600ms}
+  pricing:
+    fake-1:
+      input-per-million: 0.15
+      output-per-million: 0.60
+    fake-mini:
+      input-per-million: 0.05
+      output-per-million: 0.20
+  demo:
+    generator:
+      enabled: true
+      events-per-second: ${ENRICHER_DEMO_EVENTS_PER_SECOND:10}
+      replay-ratio: 0.15
+  pipelines:
+    dispute-triage:
+      skip:
+        small-amount: "event.amount != null and event.amount < 25"
+      budget:
+        period: daily
+        max-cost-usd: 0.25
+        tenants:
+          # One merchant with a tiny cap: downgraded, then deferred, within the first minutes.
+          "[Tailspin Airlines]":
+            max-cost-usd: 0.002
+        on-exceeded: downgrade
+        fallback-model: fake-mini
+        after-downgrade: defer
+
+management:
+  tracing:
+    sampling:
+      probability: 1.0
+  observations:
+    key-values:
+      deployment.environment: compose-demo
