@@ -153,11 +153,11 @@ jobs:
           {
             echo "### Compose demo smoke test"
             echo '```'
-            grep -E '^(ok |not yet|MISSING|all |process |chat |send |smoke)' smoke-test.log | head -60
+            grep -E '^(ok |not yet|MISSING|all |process |chat |send |smoke)' smoke-test.log | awk 'NR <= 60'
             echo '```'
             echo "### Sample envelopes from the demo stream"
             echo '```'
-            grep '"enrichment"' smoke/enriched.txt | head -3
+            grep '"enrichment"' smoke/enriched.txt | awk 'NR <= 3'
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
       - name: Enricher logs

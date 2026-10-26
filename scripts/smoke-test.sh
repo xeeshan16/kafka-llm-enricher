@@ -40,7 +40,7 @@ grep -q 'traceparent:00-' "$OUT/enriched.txt" || { echo "no traceparent header o
 sleep 20
 echo "--- prometheus scrape"
 curl -fsS "$BASE/actuator/prometheus" > "$OUT/prometheus.txt"
-grep -E '^(enricher|gen_ai)_' "$OUT/prometheus.txt" | grep -v '_bucket{' | head -60
+grep -E '^(enricher|gen_ai)_' "$OUT/prometheus.txt" | grep -v '_bucket{' | awk 'NR <= 60'
 python3 "$(dirname "$0")/check-dashboard-metrics.py" "$OUT/prometheus.txt"
 
 echo "--- prometheus server sees the target"
