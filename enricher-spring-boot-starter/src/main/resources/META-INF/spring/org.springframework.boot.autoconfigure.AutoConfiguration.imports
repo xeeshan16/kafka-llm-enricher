@@ -1,1 +1,3 @@
 io.github.xeeshan16.enricher.spring.EnricherAutoConfiguration
+io.github.xeeshan16.enricher.spring.EnricherMetricsAutoConfiguration
+io.github.xeeshan16.enricher.spring.EnricherHealthAutoConfiguration

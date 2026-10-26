@@ -2,6 +2,7 @@ package io.github.xeeshan16.enricher.spring;
 
 import io.github.xeeshan16.enricher.llm.LlmProvider;
 import io.github.xeeshan16.enricher.llm.fake.FakeLlmProvider;
+import io.github.xeeshan16.enricher.llm.fake.SchemaAwareResponder;
 import io.github.xeeshan16.enricher.llm.http.AnthropicProvider;
 import io.github.xeeshan16.enricher.llm.http.AzureOpenAiProvider;
 import io.github.xeeshan16.enricher.llm.http.HttpLlmProvider;
@@ -27,7 +28,7 @@ final class ProviderFactory {
     String provider = name == null ? "fake" : name.strip().toLowerCase(Locale.ROOT);
     LlmProvider created =
         switch (provider) {
-          case "fake" -> new FakeLlmProvider();
+          case "fake" -> fake(providers.fake());
           case "openai" -> openAi(providers.openai());
           case "anthropic" -> anthropic(providers.anthropic());
           case "azure-openai" -> azure(providers.azureOpenai());
@@ -39,6 +40,14 @@ final class ProviderFactory {
       log.info("LLM provider {}: {}", http.name(), http.settings());
     }
     return created;
+  }
+
+  private static FakeLlmProvider fake(EnricherProperties.Fake c) {
+    if (!c.latency().isZero() || !c.latencyJitter().isZero()) {
+      log.info(
+          "LLM provider fake: simulated latency {} + up to {}", c.latency(), c.latencyJitter());
+    }
+    return new FakeLlmProvider(new SchemaAwareResponder(), c.latency(), c.latencyJitter());
   }
 
   private static OpenAiCompatibleProvider openAi(EnricherProperties.OpenAi c) {

@@ -17,10 +17,13 @@ import io.github.xeeshan16.enricher.ledger.ResultLedger;
 import io.github.xeeshan16.enricher.llm.EmbeddingProvider;
 import io.github.xeeshan16.enricher.llm.LlmProvider;
 import io.github.xeeshan16.enricher.llm.fake.FakeEmbeddingProvider;
+import io.github.xeeshan16.enricher.llm.observation.LlmObservationConvention;
+import io.github.xeeshan16.enricher.llm.observation.ObservedLlmProvider;
 import io.github.xeeshan16.enricher.llm.ratelimit.ProviderRateLimiter;
 import io.github.xeeshan16.enricher.llm.ratelimit.RateLimitedLlmProvider;
 import io.github.xeeshan16.enricher.llm.resilience.ResilientLlmProvider;
 import io.github.xeeshan16.enricher.pipeline.PipelineDefinition;
+import io.micrometer.observation.ObservationRegistry;
 import java.net.InetAddress;
 import java.net.UnknownHostException;
 import java.time.Clock;
@@ -117,7 +120,10 @@ public class EnricherAutoConfiguration {
     return new PriceTable(prices);
   }
 
-  /** Token, cost and savings totals; replace it by defining your own {@link UsageMeter}. */
+  /**
+   * Token, cost and savings totals. Every {@link UsageMeter} bean receives the engine's spend
+   * events (the Micrometer exporter is one); defining your own replaces this in-memory one.
+   */
   @Bean
   @ConditionalOnMissingBean(UsageMeter.class)
   public UsageAccounting enricherUsageAccounting(PriceTable prices) {
@@ -128,15 +134,28 @@ public class EnricherAutoConfiguration {
    * The enricher. Each provider call goes through {@link ResilientLlmProvider} (per-call timeout
    * and full-jitter retries from {@code enricher.resilience.*}) and, inside it, {@link
    * RateLimitedLlmProvider}, so every attempt is admitted by the rate limiter and every 429 feeds
-   * the adaptive concurrency limit. The {@code LlmProvider} bean itself stays unwrapped.
+   * the adaptive concurrency limit. With an {@link ObservationRegistry} (Spring Boot Actuator),
+   * every attempt that reaches the provider is observed as well ({@link ObservedLlmProvider}). The
+   * {@code LlmProvider} bean itself stays unwrapped.
    */
   @Bean
   @ConditionalOnMissingBean
   public Enricher enricher(
-      LlmProvider provider, EnricherProperties properties, ProviderRateLimiter rateLimiter) {
+      LlmProvider provider,
+      EnricherProperties properties,
+      ProviderRateLimiter rateLimiter,
+      ObjectProvider<ObservationRegistry> observations,
+      ObjectProvider<LlmObservationConvention> conventions) {
+    ObservationRegistry registry = observations.getIfUnique(() -> ObservationRegistry.NOOP);
+    LlmProvider called =
+        registry == ObservationRegistry.NOOP
+            ? provider
+            : new ObservedLlmProvider(provider, registry, conventions.getIfUnique());
     return new Enricher(
         new ResilientLlmProvider(
-            new RateLimitedLlmProvider(provider, rateLimiter), policy(properties.resilience())));
+            new RateLimitedLlmProvider(called, rateLimiter),
+            policy(properties.resilience()),
+            registry));
   }
 
   /**
@@ -273,7 +292,7 @@ public class EnricherAutoConfiguration {
         enricher,
         ledger,
         new LedgeredEnricher.Settings(l.leaseTtl(), l.busyWait(), l.pollInterval()),
-        meters.getIfUnique(() -> UsageMeter.NOOP));
+        UsageMeter.composite(meters.orderedStream().toList()));
   }
 
   /**
@@ -337,7 +356,8 @@ public class EnricherAutoConfiguration {
       KafkaClientFactory clients,
       OutputRecordFactory outputs,
       ProducerFactory<?, ?> producerFactory,
-      CostPolicies costPolicies) {
+      CostPolicies costPolicies,
+      ObjectProvider<ObservationRegistry> observations) {
     String transactionIdPrefix =
         exactlyOnce(properties.delivery(), producerFactory)
             ? producerFactory.getTransactionIdPrefix()
@@ -351,7 +371,8 @@ public class EnricherAutoConfiguration {
         properties.ledger().busyRetryInterval(),
         busyBudget(properties.ledger()),
         properties.autoStartup(),
-        costPolicies);
+        costPolicies,
+        observations.getIfUnique(() -> ObservationRegistry.NOOP));
   }
 
   /** Resolves the delivery mode: whether the loops use Kafka transactions. */

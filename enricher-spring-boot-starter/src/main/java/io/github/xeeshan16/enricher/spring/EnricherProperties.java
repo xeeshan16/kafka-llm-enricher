@@ -32,6 +32,7 @@ import org.springframework.core.io.Resource;
  * @param engine settings shared by every pipeline's consumer loops
  * @param ledger the result ledger that stops duplicate paid calls
  * @param topics optional creation of the topics the pipelines use
+ * @param metrics tags of the Micrometer metrics (when Micrometer is present)
  * @param pipelines pipelines by name
  */
 @ConfigurationProperties(prefix = "enricher")
@@ -47,6 +48,7 @@ public record EnricherProperties(
     @DefaultValue Engine engine,
     @DefaultValue Ledger ledger,
     @DefaultValue Topics topics,
+    @DefaultValue Metrics metrics,
     Map<String, Pipeline> pipelines) {
 
   public EnricherProperties {
@@ -80,6 +82,7 @@ public record EnricherProperties(
                 null)
             : ledger;
     topics = topics == null ? new Topics(false, 3, (short) 1) : topics;
+    metrics = metrics == null ? new Metrics(true, 100) : metrics;
     pipelines =
         pipelines == null ? Map.of() : Collections.unmodifiableMap(new LinkedHashMap<>(pipelines));
   }
@@ -89,15 +92,17 @@ public record EnricherProperties(
    * used.
    */
   public record Providers(
+      @DefaultValue Fake fake,
       @DefaultValue OpenAi openai,
       @DefaultValue Anthropic anthropic,
       @DefaultValue AzureOpenAi azureOpenai) {
 
     static Providers defaults() {
-      return new Providers(null, null, null);
+      return new Providers(null, null, null, null);
     }
 
     public Providers {
+      fake = fake == null ? new Fake(Duration.ZERO, Duration.ZERO) : fake;
       openai =
           openai == null
               ? new OpenAi(
@@ -132,6 +137,31 @@ public record EnricherProperties(
                   Duration.ofSeconds(60),
                   null)
               : azureOpenai;
+    }
+  }
+
+  /**
+   * The offline, deterministic provider.
+   *
+   * @param latency simulated time of every call, to make demos and load tests realistic
+   * @param latencyJitter up to this much extra time, derived from the prompt (deterministic)
+   */
+  public record Fake(
+      @DefaultValue("0ms") Duration latency, @DefaultValue("0ms") Duration latencyJitter) {}
+
+  /**
+   * Tags of the {@code enricher.*} metrics.
+   *
+   * @param tenantTag tag cost, token and ledger metrics with the tenant; off tags them {@code all}
+   * @param maxTenants distinct tenant tag values per process; later tenants are tagged {@code
+   *     other}, which keeps the series count bounded with many merchants
+   */
+  public record Metrics(
+      @DefaultValue("true") boolean tenantTag, @DefaultValue("100") int maxTenants) {
+    public Metrics {
+      if (maxTenants < 1) {
+        throw new IllegalArgumentException("enricher.metrics.max-tenants must be at least 1");
+      }
     }
   }
 

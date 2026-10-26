@@ -6,7 +6,10 @@ import io.github.xeeshan16.enricher.kafka.EngineStats;
 import io.github.xeeshan16.enricher.kafka.EnrichmentProcessor;
 import io.github.xeeshan16.enricher.kafka.KafkaClientFactory;
 import io.github.xeeshan16.enricher.kafka.OutputRecordFactory;
+import io.github.xeeshan16.enricher.kafka.RecordProcessor;
+import io.github.xeeshan16.enricher.kafka.observation.ObservedRecordProcessor;
 import io.github.xeeshan16.enricher.pipeline.PipelineDefinition;
+import io.micrometer.observation.ObservationRegistry;
 import java.time.Clock;
 import java.time.Duration;
 import java.util.ArrayList;
@@ -29,6 +32,9 @@ import org.springframework.context.SmartLifecycle;
  * <prefix><pipeline>-<n>}, and writes outputs and offsets in one Kafka transaction per commit
  * interval (exactly-once). The prefix must be unique per instance and stable across its restarts.
  * Without one, loops publish and then commit offsets (at-least-once).
+ *
+ * <p>With an {@link ObservationRegistry} every record is observed ({@link
+ * ObservedRecordProcessor}): a timer, and a consumer span that continues the producer's trace.
  */
 public final class PipelineRunner implements SmartLifecycle {
 
@@ -43,6 +49,7 @@ public final class PipelineRunner implements SmartLifecycle {
   private final Duration busyBudget;
   private final boolean autoStartup;
   private final CostPolicies costPolicies;
+  private final ObservationRegistry observations;
   private final String instanceTag = UUID.randomUUID().toString().substring(0, 8);
   private final Map<ConsumerLoop, String> loops = new LinkedHashMap<>();
   private final List<Thread> threads = new ArrayList<>();
@@ -88,6 +95,34 @@ public final class PipelineRunner implements SmartLifecycle {
       Duration busyBudget,
       boolean autoStartup,
       CostPolicies costPolicies) {
+    this(
+        registry,
+        enricher,
+        clients,
+        outputs,
+        transactionIdPrefix,
+        busyRetryInterval,
+        busyBudget,
+        autoStartup,
+        costPolicies,
+        ObservationRegistry.NOOP);
+  }
+
+  /**
+   * @param observations registry for record observations, or {@link ObservationRegistry#NOOP}
+   */
+  public PipelineRunner(
+      PipelineRegistry registry,
+      LedgeredEnricher enricher,
+      KafkaClientFactory clients,
+      OutputRecordFactory outputs,
+      String transactionIdPrefix,
+      Duration busyRetryInterval,
+      Duration busyBudget,
+      boolean autoStartup,
+      CostPolicies costPolicies,
+      ObservationRegistry observations) {
+    this.observations = observations;
     this.costPolicies = costPolicies;
     this.registry = registry;
     this.enricher = enricher;
@@ -114,7 +149,7 @@ public final class PipelineRunner implements SmartLifecycle {
     }
     for (PipelineDefinition pipeline : registry.pipelines()) {
       PipelineRegistry.PipelineRuntime runtime = registry.runtime(pipeline.name());
-      EnrichmentProcessor processor =
+      RecordProcessor processor =
           new EnrichmentProcessor(
               pipeline,
               enricher,
@@ -126,6 +161,11 @@ public final class PipelineRunner implements SmartLifecycle {
               d -> Thread.sleep(d.toMillis()),
               costPolicies.policy(pipeline.name()),
               runtime.emitSkipped());
+      if (observations != ObservationRegistry.NOOP) {
+        processor =
+            new ObservedRecordProcessor(
+                processor, pipeline.name(), pipeline.deadLetterTopic(), observations);
+      }
       for (int i = 0; i < runtime.concurrency(); i++) {
         String name = "enricher-" + pipeline.name() + "-" + i;
         String transactionalId =
@@ -206,6 +246,11 @@ public final class PipelineRunner implements SmartLifecycle {
       all.addAll(loop.assignedPartitions());
     }
     return all;
+  }
+
+  /** Names of the configured pipelines. */
+  public List<String> pipelineNames() {
+    return registry.pipelines().stream().map(PipelineDefinition::name).toList();
   }
 
   /** Counters of one pipeline, summed over its loops. */
