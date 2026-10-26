@@ -1,6 +1,7 @@
 package io.github.xeeshan16.enricher.llm.fake;
 
 import io.github.xeeshan16.enricher.llm.LlmProvider;
+import io.github.xeeshan16.enricher.llm.LlmProviderException;
 import io.github.xeeshan16.enricher.llm.LlmRequest;
 import io.github.xeeshan16.enricher.llm.LlmResponse;
 import io.github.xeeshan16.enricher.llm.TokenEstimator;
@@ -25,6 +26,8 @@ public final class FakeLlmProvider implements LlmProvider {
   public static final String DEFAULT_MODEL = "fake-1";
 
   private final Function<LlmRequest, String> responder;
+  private final Duration latency;
+  private final Duration latencyJitter;
   private final AtomicLong calls = new AtomicLong();
 
   public FakeLlmProvider() {
@@ -32,7 +35,31 @@ public final class FakeLlmProvider implements LlmProvider {
   }
 
   public FakeLlmProvider(Function<LlmRequest, String> responder) {
+    this(responder, Duration.ZERO, Duration.ZERO);
+  }
+
+  /**
+   * A fake that takes time, for demos and load tests: every call sleeps {@code latency} plus a
+   * share of {@code latencyJitter} derived from the prompt, so the same request always takes the
+   * same time.
+   */
+  public FakeLlmProvider(
+      Function<LlmRequest, String> responder, Duration latency, Duration latencyJitter) {
     this.responder = Objects.requireNonNull(responder, "responder");
+    this.latency = Objects.requireNonNull(latency, "latency");
+    this.latencyJitter = Objects.requireNonNull(latencyJitter, "latencyJitter");
+    if (latency.isNegative() || latencyJitter.isNegative()) {
+      throw new IllegalArgumentException("latency and jitter must not be negative");
+    }
+  }
+
+  /** Simulated time of one call to {@code request}. */
+  public Duration latencyOf(LlmRequest request) {
+    if (latencyJitter.isZero()) {
+      return latency;
+    }
+    long hash = Integer.toUnsignedLong((request.systemPrompt() + request.userPrompt()).hashCode());
+    return latency.plusMillis(hash % (latencyJitter.toMillis() + 1));
   }
 
   @Override
@@ -43,13 +70,22 @@ public final class FakeLlmProvider implements LlmProvider {
   @Override
   public LlmResponse complete(LlmRequest request) {
     calls.incrementAndGet();
+    Duration took = latencyOf(request);
+    if (!took.isZero()) {
+      try {
+        Thread.sleep(took.toMillis());
+      } catch (InterruptedException e) {
+        Thread.currentThread().interrupt();
+        throw new LlmProviderException("interrupted during simulated latency", true, e);
+      }
+    }
     String text = Objects.requireNonNull(responder.apply(request), "responder returned null");
     TokenUsage usage =
         new TokenUsage(
             TokenEstimator.estimate(request.systemPrompt())
                 + TokenEstimator.estimate(request.userPrompt()),
             TokenEstimator.estimate(text));
-    return new LlmResponse(text, request.model(), usage, Duration.ZERO);
+    return new LlmResponse(text, request.model(), usage, took);
   }
 
   /** Number of {@link #complete} calls so far. */

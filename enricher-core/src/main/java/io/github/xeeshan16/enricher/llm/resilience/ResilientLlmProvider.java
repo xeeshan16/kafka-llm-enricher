@@ -5,6 +5,8 @@ import io.github.xeeshan16.enricher.llm.LlmProviderException;
 import io.github.xeeshan16.enricher.llm.LlmRequest;
 import io.github.xeeshan16.enricher.llm.LlmResponse;
 import io.github.xeeshan16.enricher.llm.LlmTimeoutException;
+import io.micrometer.observation.Observation;
+import io.micrometer.observation.ObservationRegistry;
 import java.time.Duration;
 import java.util.Objects;
 import java.util.concurrent.ExecutionException;
@@ -33,6 +35,10 @@ import org.slf4j.LoggerFactory;
  * callTimeout * maxAttempts} plus the waits; {@link Policy#worstCase()} gives that bound. When
  * attempts are exhausted the last exception propagates, and the engine decides whether the record
  * goes to a retry topic or the dead-letter topic.
+ *
+ * <p>Attempts run on their own virtual thread, so the observation current on the caller's thread
+ * (the Kafka record's span) is re-opened there; observations of the wrapped provider then nest
+ * under it.
  */
 public final class ResilientLlmProvider implements LlmProvider, AutoCloseable {
 
@@ -81,6 +87,7 @@ public final class ResilientLlmProvider implements LlmProvider, AutoCloseable {
   private final Policy policy;
   private final FullJitterBackoff backoff;
   private final Sleeper sleeper;
+  private final ObservationRegistry observations;
   private final ExecutorService callThreads = Executors.newVirtualThreadPerTaskExecutor();
 
   public ResilientLlmProvider(LlmProvider delegate, Policy policy) {
@@ -91,8 +98,31 @@ public final class ResilientLlmProvider implements LlmProvider, AutoCloseable {
         d -> Thread.sleep(d.toMillis()));
   }
 
+  /**
+   * @param observations registry whose current observation is carried onto the attempt threads
+   */
+  public ResilientLlmProvider(
+      LlmProvider delegate, Policy policy, ObservationRegistry observations) {
+    this(
+        delegate,
+        policy,
+        FullJitterBackoff.of(policy.initialBackoff(), policy.maxBackoff()),
+        d -> Thread.sleep(d.toMillis()),
+        observations);
+  }
+
   public ResilientLlmProvider(
       LlmProvider delegate, Policy policy, FullJitterBackoff backoff, Sleeper sleeper) {
+    this(delegate, policy, backoff, sleeper, ObservationRegistry.NOOP);
+  }
+
+  public ResilientLlmProvider(
+      LlmProvider delegate,
+      Policy policy,
+      FullJitterBackoff backoff,
+      Sleeper sleeper,
+      ObservationRegistry observations) {
+    this.observations = Objects.requireNonNull(observations, "observations");
     this.delegate = Objects.requireNonNull(delegate, "delegate");
     this.policy = Objects.requireNonNull(policy, "policy");
     this.backoff = Objects.requireNonNull(backoff, "backoff");
@@ -141,7 +171,17 @@ public final class ResilientLlmProvider implements LlmProvider, AutoCloseable {
     if (policy.callTimeout().isZero()) {
       return delegate.complete(request);
     }
-    Future<LlmResponse> call = callThreads.submit(() -> delegate.complete(request));
+    Observation parent = observations.getCurrentObservation();
+    Future<LlmResponse> call =
+        callThreads.submit(
+            () -> {
+              if (parent == null) {
+                return delegate.complete(request);
+              }
+              try (Observation.Scope ignored = parent.openScope()) {
+                return delegate.complete(request);
+              }
+            });
     try {
       return call.get(policy.callTimeout().toMillis(), TimeUnit.MILLISECONDS);
     } catch (TimeoutException e) {
