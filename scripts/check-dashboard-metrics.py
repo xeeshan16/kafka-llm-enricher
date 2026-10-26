@@ -22,14 +22,21 @@ OPTIONAL = {
 }
 
 
+def metric_names(expr):
+    # Drop label matchers and grouping clauses: they hold label names, not metric names.
+    expr = re.sub(r"\{[^}]*\}", "", expr)
+    expr = re.sub(r"\b(?:by|without)\s*\([^)]*\)", "", expr)
+    return re.findall(r"\b((?:enricher|gen_ai)_[a-z0-9_]+)\b", expr)
+
+
 def queried_metrics(dashboard):
     names = set()
     for panel in dashboard["panels"]:
         for t in panel.get("targets", []):
-            names.update(re.findall(r"\b((?:enricher|gen_ai)_[a-z0-9_]+)\b", t["expr"]))
+            names.update(metric_names(t["expr"]))
     for var in dashboard["templating"]["list"]:
         q = var.get("definition", "")
-        names.update(re.findall(r"\b((?:enricher|gen_ai)_[a-z0-9_]+)\b", q))
+        names.update(re.findall(r"label_values\(((?:enricher|gen_ai)_[a-z0-9_]+)", q))
     return names
 
 
