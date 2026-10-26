@@ -1,0 +1,7 @@
+kafka-llm-enricher {{ .Chart.AppVersion }} is running as {{ include "enricher.fullname" . }} ({{ .Values.replicaCount }} replicas).
+
+  Health:     kubectl port-forward svc/{{ include "enricher.fullname" . }} 8080:{{ .Values.service.port }}
+              curl localhost:8080/actuator/health
+  Metrics:    /actuator/prometheus{{ if .Values.serviceMonitor.enabled }} (ServiceMonitor created){{ end }}
+  Dashboard:  import deploy/grafana/dashboards/kafka-llm-enricher.json into Grafana
+  Provider:   {{ .Values.provider.name }}{{ if eq .Values.provider.name "fake" }} (offline fake; set provider.name and provider.existingSecret for a real model){{ end }}

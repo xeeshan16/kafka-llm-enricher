@@ -1,0 +1,7 @@
+apiVersion: 1
+providers:
+  - name: kafka-llm-enricher
+    type: file
+    disableDeletion: false
+    options:
+      path: /var/lib/grafana/dashboards

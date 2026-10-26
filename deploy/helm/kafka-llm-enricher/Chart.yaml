@@ -1,0 +1,10 @@
+apiVersion: v2
+name: kafka-llm-enricher
+description: Exactly-once, budgeted LLM enrichment for Kafka streams (Spring Boot service).
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+keywords: [kafka, llm, enrichment, spring-boot, opentelemetry]
+home: https://github.com/xeeshan16/kafka-llm-enricher
+sources:
+  - https://github.com/xeeshan16/kafka-llm-enricher

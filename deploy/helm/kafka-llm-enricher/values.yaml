@@ -1,0 +1,107 @@
+# Default values for kafka-llm-enricher. Kafka and PostgreSQL are not part of this chart: point the
+# release at your own (see kafka.* and database.*).
+
+replicaCount: 2
+
+image:
+  # Build it with `docker build -t <registry>/kafka-llm-enricher:<tag> .` from the repository root.
+  repository: kafka-llm-enricher
+  tag: ""          # defaults to the chart's appVersion
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+kafka:
+  bootstrapServers: kafka:9092
+
+database:
+  url: jdbc:postgresql://postgres:5432/enricher
+  username: enricher
+  # Secret holding the password under passwordKey. Leave empty to use database.password (dev only).
+  existingSecret: ""
+  passwordKey: password
+  password: enricher
+
+provider:
+  # fake, openai (OpenAI, Ollama, vLLM), anthropic or azure-openai.
+  name: fake
+  # Secret with ENRICHER_OPENAI_API_KEY / ENRICHER_ANTHROPIC_API_KEY / ENRICHER_AZURE_OPENAI_API_KEY
+  # and similar variables, loaded with envFrom. Keys never go into values.
+  existingSecret: ""
+
+tracing:
+  # OTLP/HTTP traces endpoint, e.g. http://otel-collector.observability:4318/v1/traces. Empty: no export.
+  otlpEndpoint: ""
+  samplingProbability: "0.1"
+
+logging:
+  # ecs, logstash or gelf for JSON logs (trace ids included); empty for plain text.
+  structuredFormat: ecs
+
+# Spring Boot configuration merged over the image's application.yml: pipelines, budgets, pricing.
+# Mounted at /config/application.yml.
+config: |
+  enricher:
+    pipelines:
+      dispute-triage:
+        max-in-flight: 16
+
+# Extra environment variables, e.g. ENRICHER_RPM, ENRICHER_TPM, ENRICHER_DISPUTE_MODEL.
+env: []
+#  - name: ENRICHER_RPM
+#    value: "500"
+
+resources:
+  requests:
+    cpu: 250m
+    memory: 512Mi
+  limits:
+    memory: 1Gi
+
+# The engine drains running records and commits on shutdown (enricher.engine.shutdown-timeout).
+terminationGracePeriodSeconds: 45
+
+podAnnotations: {}
+podLabels: {}
+
+# prometheus.io/* annotations for annotation-based scraping.
+prometheusAnnotations: true
+
+serviceMonitor:
+  # Requires the Prometheus Operator CRDs.
+  enabled: false
+  interval: 15s
+  labels: {}
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 10001
+  runAsGroup: 10001
+  fsGroup: 10001
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: ["ALL"]
+
+service:
+  type: ClusterIP
+  port: 8080
+
+nodeSelector: {}
+tolerations: []
+affinity: {}

@@ -1,0 +1,107 @@
+# Demo: Kafka, PostgreSQL, the enricher with a synthetic payments-dispute stream, Prometheus,
+# Grafana and Jaeger. No API keys needed (the fake provider, with simulated latency and prices).
+#
+#   docker compose up -d --build
+#   open http://localhost:3000   (Grafana, dashboard "Kafka LLM Enricher")
+#   open http://localhost:16686  (Jaeger, service kafka-llm-enricher)
+#   docker compose exec kafka /opt/kafka/bin/kafka-console-consumer.sh \
+#     --bootstrap-server localhost:9092 --topic payments.disputes.enriched --max-messages 3
+#
+# To use a real model, set for example ENRICHER_PROVIDER=openai and
+# ENRICHER_OPENAI_BASE_URL=http://host.docker.internal:11434/v1 (Ollama) in a .env file.
+
+name: kafka-llm-enricher
+
+services:
+  kafka:
+    image: apache/kafka:3.8.0
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093,HOST://:29092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,HOST://localhost:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,HOST:PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+    ports:
+      - "29092:29092"
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list"]
+      interval: 5s
+      timeout: 10s
+      retries: 30
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: enricher
+      POSTGRES_USER: enricher
+      POSTGRES_PASSWORD: enricher
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U enricher -d enricher"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  enricher:
+    image: kafka-llm-enricher:local
+    build: .
+    depends_on:
+      kafka:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      ENRICHER_DB_URL: jdbc:postgresql://postgres:5432/enricher
+      ENRICHER_TX_ID_PREFIX: enricher-demo-
+      ENRICHER_PROVIDER: ${ENRICHER_PROVIDER:-fake}
+      ENRICHER_OPENAI_BASE_URL: ${ENRICHER_OPENAI_BASE_URL:-https://api.openai.com/v1}
+      ENRICHER_OPENAI_API_KEY: ${ENRICHER_OPENAI_API_KEY:-}
+      ENRICHER_DISPUTE_MODEL: ${ENRICHER_DISPUTE_MODEL:-fake-1}
+      # Synthetic dispute stream, simulated latency, illustrative prices and cost controls:
+      # see enricher-app/src/main/resources/application-demo.yml.
+      SPRING_PROFILES_ACTIVE: demo
+      ENRICHER_DEMO_EVENTS_PER_SECOND: ${ENRICHER_DEMO_EVENTS_PER_SECOND:-10}
+      MANAGEMENT_OTLP_TRACING_ENDPOINT: http://jaeger:4318/v1/traces
+      LOGGING_STRUCTURED_FORMAT_CONSOLE: ecs
+    ports:
+      - "8080:8080"
+
+  prometheus:
+    image: prom/prometheus:v3.5.0
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --web.enable-lifecycle
+    volumes:
+      - ./deploy/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "9090:9090"
+
+  grafana:
+    image: grafana/grafana:12.0.0
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+      GF_AUTH_DISABLE_LOGIN_FORM: "true"
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/kafka-llm-enricher.json
+    volumes:
+      - ./deploy/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./deploy/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports:
+      - "3000:3000"
+    depends_on:
+      - prometheus
+
+  jaeger:
+    image: jaegertracing/jaeger:2.5.0
+    ports:
+      - "16686:16686"
+      - "4318:4318"

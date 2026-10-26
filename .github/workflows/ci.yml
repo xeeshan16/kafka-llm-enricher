@@ -79,6 +79,7 @@ jobs:
           engine=$reports/io.github.xeeshan16.enricher.engine.ConcurrencyAndRetryIT-output.txt
           cost=$reports/io.github.xeeshan16.enricher.engine.CostControlIT-output.txt
           budget=enricher-ledger-postgres/target/failsafe-reports/io.github.xeeshan16.enricher.ledger.postgres.PostgresBudgetStoreIT-output.txt
+          observability=$reports/io.github.xeeshan16.enricher.app.ObservabilityIT-output.txt
           {
             if [ -f "$chaos" ]; then
               echo "### Exactly-once chaos test"
@@ -99,6 +100,13 @@ jobs:
               [ -f "$budget" ] && grep -E "^budget: " "$budget"
               echo '```'
             fi
+            if [ -f "$observability" ]; then
+              echo "### Trace of one record and exported series (ObservabilityIT)"
+              echo '```'
+              grep -E "^TRACE_SPAN" "$observability" | sed -E 's/^TRACE_SPAN //'
+              grep -E "^PROMETHEUS (gen_ai_client_operation_seconds_count|enricher_record_process_seconds_count|enricher_cost_usd_total|enricher_provider_calls_total|enricher_pii_masked_total)" "$observability" | sed -E 's/^PROMETHEUS //'
+              echo '```'
+            fi
             if [ -f "$sample" ]; then
               echo "### Sample envelopes (fake provider)"
               echo '```'
@@ -116,3 +124,81 @@ jobs:
             */target/failsafe-reports/
             */target/site/jacoco/
           if-no-files-found: ignore
+
+  docker:
+    name: docker image, compose demo smoke test
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build the image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: kafka-llm-enricher:local
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Image size and user
+        run: docker image inspect kafka-llm-enricher:local --format '{{.Size}} bytes, user {{.Config.User}}'
+      - name: Start the demo (docker compose up)
+        run: docker compose up -d --no-build
+      - name: Smoke test
+        env:
+          SMOKE_OUT: smoke
+        run: |
+          set -o pipefail
+          scripts/smoke-test.sh 2>&1 | tee smoke-test.log
+          {
+            echo "### Compose demo smoke test"
+            echo '```'
+            grep -E '^(ok |not yet|MISSING|all |process |chat |send |smoke)' smoke-test.log | head -60
+            echo '```'
+            echo "### Sample envelopes from the demo stream"
+            echo '```'
+            grep '"enrichment"' smoke/enriched.txt | head -3
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Enricher logs
+        if: always()
+        run: docker compose logs enricher --no-color | tail -200
+      - name: Upload smoke-test outputs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: compose-smoke
+          path: |
+            smoke/
+            smoke-test.log
+          if-no-files-found: ignore
+      - name: Stop the demo
+        if: always()
+        run: docker compose down -v
+
+  helm:
+    name: helm chart lint and render
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
+        with:
+          version: v3.16.4
+      - name: Lint
+        run: helm lint deploy/helm/kafka-llm-enricher --strict
+      - name: Render (defaults and all options)
+        run: |
+          helm template demo deploy/helm/kafka-llm-enricher > rendered-defaults.yaml
+          helm template demo deploy/helm/kafka-llm-enricher \
+            --set serviceMonitor.enabled=true \
+            --set tracing.otlpEndpoint=http://otel-collector:4318/v1/traces \
+            --set provider.name=openai --set provider.existingSecret=llm-keys \
+            --set database.existingSecret=enricher-db \
+            --set 'env[0].name=ENRICHER_RPM' --set-string 'env[0].value=500' > rendered-all.yaml
+          python3 scripts/check-helm-render.py rendered-defaults.yaml rendered-all.yaml
+      - name: Upload rendered manifests
+        uses: actions/upload-artifact@v4
+        with:
+          name: helm-rendered
+          path: rendered-*.yaml

@@ -1,0 +1,9 @@
+global:
+  scrape_interval: 5s
+  evaluation_interval: 5s
+
+scrape_configs:
+  - job_name: kafka-llm-enricher
+    metrics_path: /actuator/prometheus
+    static_configs:
+      - targets: ["enricher:8080"]

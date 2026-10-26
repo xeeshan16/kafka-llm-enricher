@@ -1,0 +1,6 @@
+# JitPack builds a tag on first request; consumers then depend on, for example,
+#   com.github.xeeshan16.kafka-llm-enricher:enricher-spring-boot-starter:<tag>
+jdk:
+  - openjdk21
+install:
+  - ./mvnw -B -ntp -DskipTests -Dspotless.check.skip=true -Djacoco.skip=true install
