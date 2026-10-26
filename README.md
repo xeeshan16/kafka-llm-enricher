@@ -151,6 +151,14 @@ scripts/smoke-test.sh            # what CI runs against the same stack
 docker compose down -v
 ```
 
+In CI ([run 40331475558](https://github.com/xeeshan16/kafka-llm-enricher/actions/runs/40331475558)) the smoke test pulled this trace from Jaeger about a minute after startup; the 360 ms is the fake's simulated latency:
+
+```
+process payments.disputes               364.8 ms  parent: -
+chat fake-1                             360.6 ms  parent: process payments.disputes
+send payments.disputes.enriched           0.1 ms  parent: process payments.disputes
+```
+
 To try a real model, put for example `ENRICHER_PROVIDER=openai`, `ENRICHER_OPENAI_BASE_URL=http://host.docker.internal:11434/v1` and `ENRICHER_DISPUTE_MODEL=llama3.1:8b` (Ollama) in a `.env` file next to `docker-compose.yml`.
 
 ### Use it in your own Spring Boot service
