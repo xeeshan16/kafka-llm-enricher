@@ -2,7 +2,7 @@
 
 **Add LLM enrichment to a Kafka stream as configuration, not as another hand-written consumer: schema-validated answers, exactly-once output, a PostgreSQL result ledger so rebalances, retries and replays never pay twice for the same event, per-key parallelism that never stalls the poll loop, provider rate limits plus per-tenant budgets so one merchant's burst cannot spend everyone's quota, and card numbers, IBANs, emails and phone numbers masked before any prompt leaves the process.**
 
-> Status: under active development towards `v0.1.0`. Days 1 to 5 of 7 are done: the core engine, the Spring Boot starter, Kafka transactions and the result ledger, a parallel key-ordered consumer loop with retry topics, cost controls (rate limiting with adaptive concurrency, per-tenant budgets, skip rules, cost accounting), and output quality and safety (PII masking, an injection guard, schema repair prompts, real OpenAI-compatible, Anthropic and Azure OpenAI providers), tested against real Kafka and PostgreSQL. See [docs/PLAN.md](docs/PLAN.md) and [docs/PROGRESS.md](docs/PROGRESS.md).
+> Status: under active development towards `v0.1.0`. Days 1 to 6 of 7 are done: the core engine, the Spring Boot starter, Kafka transactions and the result ledger, a parallel key-ordered consumer loop with retry topics, cost controls (rate limiting with adaptive concurrency, per-tenant budgets, skip rules, cost accounting), output quality and safety (PII masking, an injection guard, schema repair prompts, real OpenAI-compatible, Anthropic and Azure OpenAI providers), and observability and packaging (Prometheus metrics, OpenTelemetry traces from the input record through each model call to the output record, a Grafana dashboard, a Docker image, a `docker compose up` demo and a Helm chart), tested against real Kafka and PostgreSQL. See [docs/PLAN.md](docs/PLAN.md) and [docs/PROGRESS.md](docs/PROGRESS.md).
 
 ## The problem
 
@@ -123,7 +123,35 @@ The integration tests start Kafka and PostgreSQL in Docker and run the `dispute-
 - `ExactlyOnceChaosIT` runs two instances in one consumer group, aborts transactions after results are stored, and hangs one worker past `max.poll.interval.ms` so it is expelled mid-call. It asserts one committed envelope and one paid call per input.
 - `ConcurrencyAndRetryIT` checks per-key order while one call takes longer than `max.poll.interval.ms`, retry-topic delays, and dead-letter reasons for permanent, exhausted and poison records.
 - `DisputeTriagePipelineIT` also asserts that a card number and an email in an event never reach the provider, and that an answer missing required fields is fixed by one repair prompt.
+- `ObservabilityIT` publishes a dispute inside an upstream trace and checks that the trace continues through `process`, `chat` and `send` spans into the output record's headers, that no span holds the card number, and that the Prometheus scrape has the series the dashboard reads.
 - `CostControlIT` runs three tenants against a per-tenant cost cap (downgrade, then defer, never over the cap), a skip rule, free ledger replays for a tenant that is out of budget, and a provider that answers 429 above 3 concurrent calls.
+
+### Run the demo
+
+Requirements: Docker with Compose. No API keys.
+
+```bash
+docker compose up -d --build     # Kafka, PostgreSQL, the enricher, Prometheus, Grafana, Jaeger
+```
+
+The enricher runs with the `demo` profile ([`application-demo.yml`](enricher-app/src/main/resources/application-demo.yml)): a reproducible stream of synthetic card disputes at 10 per second (public test card numbers, `example.com` emails, 15 % exact replays, a few injection attempts), the fake model with a simulated 150 to 750 ms latency and made-up prices, a skip rule for small amounts, and per-merchant daily budgets with one merchant capped low enough to be downgraded and then deferred within minutes.
+
+| Where | What |
+|---|---|
+| http://localhost:3000 | Grafana, dashboard "Kafka LLM Enricher" (no login) |
+| http://localhost:16686 | Jaeger, service `kafka-llm-enricher`: one trace per record |
+| http://localhost:8080/actuator/health | Health, including the consumer loops |
+| http://localhost:8080/actuator/prometheus | Raw metrics |
+| `localhost:29092` | Kafka from the host |
+
+```bash
+docker compose exec kafka /opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server localhost:9092 \
+  --topic payments.disputes.enriched --isolation-level read_committed --max-messages 3 --property print.headers=true
+scripts/smoke-test.sh            # what CI runs against the same stack
+docker compose down -v
+```
+
+To try a real model, put for example `ENRICHER_PROVIDER=openai`, `ENRICHER_OPENAI_BASE_URL=http://host.docker.internal:11434/v1` and `ENRICHER_DISPUTE_MODEL=llama3.1:8b` (Ollama) in a `.env` file next to `docker-compose.yml`.
 
 ### Use it in your own Spring Boot service
 
@@ -144,7 +172,30 @@ For exactly-once output and a shared ledger, also:
 - set `spring.kafka.producer.transaction-id-prefix` to a value **unique per instance** (for example `enricher-${POD_NAME}-`) and `spring.kafka.consumer.isolation-level=read-committed`;
 - add `io.github.xeeshan16:enricher-ledger-postgres` and a `DataSource` (`spring.datasource.*`). The ledger creates its table with its own Flyway history table (`enricher_ledger_schema_history`), so it does not touch your migrations. To apply the DDL yourself, copy [`V1__result_ledger.sql`](enricher-ledger-postgres/src/main/resources/db/enricher-ledger/V1__result_ledger.sql) and set `enricher.ledger.initialize-schema=false`.
 
-A `docker compose up` demo with a synthetic dispute stream, a Docker image and a Helm chart arrive on day 6.
+With `spring-boot-starter-actuator` on your classpath you also get the metrics, the model-call and record observations (spans, with a tracing bridge) and the `enricher` health component described in [docs/OBSERVABILITY.md](docs/OBSERVABILITY.md). The repository has a `jitpack.yml`, so from the `v0.1.0` tag the starter can be used from JitPack without credentials.
+
+### Run it as a service: Docker and Kubernetes
+
+The standalone service is configured entirely through `application.yml`, environment variables and an optional extra config file (`SPRING_CONFIG_ADDITIONAL_LOCATION`).
+
+```bash
+docker build -t kafka-llm-enricher:local .        # multi-stage: Maven build, then a JRE image running as uid 10001
+docker run --rm -p 8080:8080 -e KAFKA_BOOTSTRAP_SERVERS=broker:9092 \
+  -e ENRICHER_DB_URL=jdbc:postgresql://db:5432/enricher kafka-llm-enricher:local
+```
+
+The Helm chart in [`deploy/helm/kafka-llm-enricher`](deploy/helm/kafka-llm-enricher) deploys it against your existing Kafka and PostgreSQL: a transactional id per pod (`enricher-$(POD_NAME)-`), liveness and readiness probes on the actuator, pipelines as a values block mounted as `application.yml`, model keys from an existing secret, a read-only root file system, a PodDisruptionBudget, Prometheus annotations and an optional `ServiceMonitor`.
+
+```bash
+helm install disputes deploy/helm/kafka-llm-enricher \
+  --set image.repository=<registry>/kafka-llm-enricher --set image.tag=<tag> \
+  --set kafka.bootstrapServers=kafka.kafka:9092 \
+  --set database.url=jdbc:postgresql://postgres.db:5432/enricher --set database.existingSecret=enricher-db \
+  --set provider.name=openai --set provider.existingSecret=enricher-llm-keys \
+  --set tracing.otlpEndpoint=http://otel-collector.observability:4318/v1/traces
+```
+
+CI builds the image, starts the compose stack and runs [`scripts/smoke-test.sh`](scripts/smoke-test.sh) against it, and lints and renders the chart. No image is published to a registry yet.
 
 ### Connect a real model
 
@@ -209,8 +260,32 @@ How one record flows:
 | `enricher-core` | Framework-free engine: provider interfaces, the fake and the HTTP providers (OpenAI-compatible, Anthropic, Azure OpenAI), retries, rate limiting, PII masking, prompt rendering, schema validation and repair, canonical hashing, envelopes, the result ledger contract, budgets, skip rules, cost accounting and `LedgeredEnricher`. |
 | `enricher-kafka` | `ConsumerLoop` on plain `kafka-clients`: key lanes, pause/resume backpressure, batched transactions, retry and deferred topics, routing. No Spring dependency. |
 | `enricher-ledger-postgres` | `PostgresResultLedger`, `PostgresBudgetStore` and their Flyway migrations. Optional. |
-| `enricher-spring-boot-starter` | `enricher.*` properties, SpEL skip rules and tenants, ledger and budget store selection, one consumer loop per pipeline consumer, optional topic creation. Every bean can be replaced. |
-| `enricher-app` | Runnable service configured entirely by `application.yml` and environment variables. |
+| `enricher-spring-boot-starter` | `enricher.*` properties, SpEL skip rules and tenants, ledger and budget store selection, one consumer loop per pipeline consumer, optional topic creation, Micrometer metrics and the health indicator when Actuator is present. Every bean can be replaced. |
+| `enricher-app` | Runnable service configured entirely by `application.yml` and environment variables, with Actuator, a Prometheus endpoint, OpenTelemetry tracing over OTLP, and the demo stream (`demo` profile). |
+
+## Observability
+
+Each record is one trace, continued from the producer's `traceparent` header and handed on in the output's headers: a `process <topic>` consumer span, a `chat <model>` client span per provider exchange (attempts and repairs included, named and tagged after the OpenTelemetry GenAI conventions), and a `send <topic>` producer span per output record. Prompts, answers, keys and values are never span attributes.
+
+A trace of one dispute, printed by `ObservabilityIT` in CI run [40330115135](https://github.com/xeeshan16/kafka-llm-enricher/actions/runs/40330115135) (fake provider with 15 ms simulated latency; the first record after startup, so the times include warm-up):
+
+```
+process payments.disputes        kind=CONSUMER parent=upstream duration=120.6ms
+chat fake-1                      kind=CLIENT   parent=process duration=32.7ms
+send payments.disputes.enriched  kind=PRODUCER parent=process duration=1.4ms
+```
+
+and from the same run's Prometheus scrape (abridged):
+
+```
+gen_ai_client_operation_seconds_count{error_type="none",gen_ai_operation_name="chat",gen_ai_provider_name="fake",gen_ai_request_model="fake-1",...} 1
+enricher_record_process_seconds_count{outcome="enriched",pipeline="dispute-triage",messaging_destination_name="payments.disputes",...} 1
+enricher_provider_calls_total{model="fake-1",pipeline="dispute-triage",tenant="Northwind Electronics",...} 1.0
+enricher_cost_usd_total{model="fake-1",pipeline="dispute-triage",tenant="Northwind Electronics",...} 5.8E-5
+enricher_pii_masked_total{pipeline="dispute-triage",type="PAN",...} 1.0
+```
+
+Prometheus metrics cover records by outcome and their latency, model-call latency by result, tokens (the GenAI token histogram), spend and ledger savings per tenant (tenant tags bounded by `enricher.metrics.max-tenants`), skips, deferrals and downgrades, repairs, masked personal data, commits, rebalances, backpressure, and the rate limiter's AIMD limit and 429s. The Grafana dashboard in [`deploy/grafana/dashboards`](deploy/grafana/dashboards) reads them, and CI checks that every metric it queries is exported. The `enricher` health component is `DOWN` when a consumer loop has died. Full catalogue, span attributes and cardinality rules: [docs/OBSERVABILITY.md](docs/OBSERVABILITY.md).
 
 ## Design choices so far
 
@@ -227,6 +302,7 @@ How one record flows:
 - **Cost decisions before the call, in a fixed order.** Skip rules, then the ledger (hits are free even for a tenant out of budget), then a worst-case budget reservation settled to real usage, then the over-budget action. Rate limiting runs per attempt inside the retry layer, so every 429 shrinks the concurrency limit. See [ADR 0004](docs/adr/0004-cost-controls-before-the-call.md).
 - **Budgets that hold across replicas.** A charge is one conditional `INSERT .. ON CONFLICT DO UPDATE .. WHERE` in PostgreSQL, so concurrent instances cannot jointly cross a tenant's cap.
 - **Safe expressions.** Skip rules and tenant expressions run in SpEL's `SimpleEvaluationContext`: field access, comparisons and string methods, but no type references, constructors or bean access.
+- **Observation API in the core, exporters at the edge.** The framework-free modules depend only on Micrometer's observation API (a no-op without a registry); Spring Boot wires the meter registry, the OpenTelemetry bridge and the exporters. Model-call observations sit inside the retry layer and the rate limiter, so one span is one HTTP exchange and admission waits are not counted as model latency.
 - **Fail at startup, not per record.** Unknown template placeholders, unreadable schemas, invalid SpEL, contradicting budget settings and pipelines that write to their own input topic stop the application with the pipeline name in the error.
 
 ## Configuration reference
@@ -290,8 +366,12 @@ How one record flows:
 | `enricher.pipelines.<name>.prompt-guard` | `true` | Prepend the injection guard to the system prompt. |
 | `enricher.pipelines.<name>.output-pii` | `mask` | Personal data found in a valid answer: `mask`, `reject` (dead-letter as `PII_IN_OUTPUT`) or `allow`. |
 | `enricher.pipelines.<name>.repair-attempts` | `1` | Repair prompts (0 to 2) for an answer that is not JSON or breaks the schema; each is a paid, budgeted call. |
+| `enricher.metrics.tenant-tag` | `true` | Tag cost, token and ledger metrics with the tenant (`false`: `all`). |
+| `enricher.metrics.max-tenants` | `100` | Distinct tenant tag values per process; later tenants are tagged `other`. |
+| `enricher.providers.fake.latency` / `latency-jitter` | `0ms` / `0ms` | Simulated latency of the fake provider (deterministic per prompt), for demos and load tests. |
+| `enricher.demo.generator.enabled` / `events-per-second` / `max-events` / `replay-ratio` / `seed` | `false` / `5` / `0` (no limit) / `0.1` / `42` | Synthetic dispute stream of the standalone app (`DisputeGenerator`), on in the `demo` profile. |
 
-Kafka client settings come from Spring Boot's `spring.kafka.*`, the ledger database from `spring.datasource.*`. The standalone app reads `KAFKA_BOOTSTRAP_SERVERS`, `ENRICHER_TX_ID_PREFIX`, `ENRICHER_DB_URL`, `ENRICHER_DB_USER`, `ENRICHER_DB_PASSWORD`, `ENRICHER_DB_POOL_SIZE`, `ENRICHER_DELIVERY`, `ENRICHER_LEDGER_STORE`, `ENRICHER_LEDGER_LEASE_TTL`, `ENRICHER_LEDGER_INIT_SCHEMA`, `ENRICHER_PROVIDER`, `ENRICHER_OPENAI_BASE_URL`, `ENRICHER_OPENAI_API_KEY`, `ENRICHER_OPENAI_STRUCTURED_OUTPUT`, `ENRICHER_OPENAI_TEMPERATURE`, `ENRICHER_ANTHROPIC_BASE_URL`, `ENRICHER_ANTHROPIC_API_KEY`, `ENRICHER_AZURE_OPENAI_ENDPOINT`, `ENRICHER_AZURE_OPENAI_API_KEY`, `ENRICHER_AZURE_OPENAI_API_VERSION`, `ENRICHER_PROVIDER_REQUEST_TIMEOUT`, `ENRICHER_REPAIR_ATTEMPTS`, `ENRICHER_CREATE_TOPICS`, `ENRICHER_DISPUTE_MODEL`, `ENRICHER_CALL_TIMEOUT`, `ENRICHER_MAX_ATTEMPTS`, `ENRICHER_MAX_IN_FLIGHT`, `ENRICHER_RPM`, `ENRICHER_TPM`, `ENRICHER_RATE_LIMIT_MAX_WAIT` and `ENRICHER_MAX_PROVIDER_CONCURRENCY`.
+Kafka client settings come from Spring Boot's `spring.kafka.*`, the ledger database from `spring.datasource.*`. The standalone app reads `KAFKA_BOOTSTRAP_SERVERS`, `ENRICHER_TX_ID_PREFIX`, `ENRICHER_DB_URL`, `ENRICHER_DB_USER`, `ENRICHER_DB_PASSWORD`, `ENRICHER_DB_POOL_SIZE`, `ENRICHER_DELIVERY`, `ENRICHER_LEDGER_STORE`, `ENRICHER_LEDGER_LEASE_TTL`, `ENRICHER_LEDGER_INIT_SCHEMA`, `ENRICHER_PROVIDER`, `ENRICHER_OPENAI_BASE_URL`, `ENRICHER_OPENAI_API_KEY`, `ENRICHER_OPENAI_STRUCTURED_OUTPUT`, `ENRICHER_OPENAI_TEMPERATURE`, `ENRICHER_ANTHROPIC_BASE_URL`, `ENRICHER_ANTHROPIC_API_KEY`, `ENRICHER_AZURE_OPENAI_ENDPOINT`, `ENRICHER_AZURE_OPENAI_API_KEY`, `ENRICHER_AZURE_OPENAI_API_VERSION`, `ENRICHER_PROVIDER_REQUEST_TIMEOUT`, `ENRICHER_REPAIR_ATTEMPTS`, `ENRICHER_CREATE_TOPICS`, `ENRICHER_DISPUTE_MODEL`, `ENRICHER_CALL_TIMEOUT`, `ENRICHER_MAX_ATTEMPTS`, `ENRICHER_MAX_IN_FLIGHT`, `ENRICHER_RPM`, `ENRICHER_TPM`, `ENRICHER_RATE_LIMIT_MAX_WAIT`, `ENRICHER_MAX_PROVIDER_CONCURRENCY`, `ENRICHER_FAKE_LATENCY`, `ENRICHER_FAKE_LATENCY_JITTER`, `ENRICHER_METRICS_TENANT_TAG`, `ENRICHER_METRICS_MAX_TENANTS`, `ENRICHER_TRACE_SAMPLING` (default `0.1`), `ENRICHER_ENVIRONMENT`, `ENRICHER_HEALTH_DETAILS` and `SERVER_PORT`, plus Spring Boot's own `MANAGEMENT_OTLP_TRACING_ENDPOINT` (traces are exported only when it is set), `LOGGING_STRUCTURED_FORMAT_CONSOLE` (`ecs`, `logstash`, `gelf`) and `SPRING_PROFILES_ACTIVE` (`demo`).
 
 Skip rules and tenant expressions see `event` (the parsed value as maps and lists), `key`, `topic`, `partition` and `offset`. Missing fields read as `null`, so guard comparisons: `event.amount != null and event.amount < 5`. They run in SpEL's `SimpleEvaluationContext`: no `T(...)`, no constructors, no bean references. A rule that throws on a record does not skip it; a tenant expression that throws charges the record to `default`.
 
@@ -390,7 +470,9 @@ The full eval harness lands on day 7; this section will only ever show numbers f
 - Deferred records wait in the consumer's memory until their budget window resets; a restart reads them again from the deferred topic.
 - PII detection is pattern-based: names, addresses and national ids need `mask-fields` or a custom `PiiDetector`. The envelope keeps the original event, so the output topic needs the input topic's access controls. See the [threat model](docs/THREAT-MODEL.md).
 - The guard and escaping make prompt injection harder, not impossible: a model can still be steered to a different schema-valid answer. Treat enrichments as advisory input.
-- The HTTP providers are tested against a local stub server, not against hosted models, in CI. Metrics export (Micrometer, OpenTelemetry) lands on day 6; until then the counters are available as beans (`UsageAccounting`, `ProviderRateLimiter.stats()`, `PipelineRunner.stats()`).
+- The HTTP providers are tested against a local stub server, not against hosted models, in CI.
+- The `send` span of an output record ends when the record is handed to the engine, before its Kafka transaction commits; an aborted transaction still shows a send span. Consumer lag is not exported by the enricher; use your Kafka exporter for it.
+- No container image is published to a registry yet; build it from the Dockerfile.
 
 ## License
 

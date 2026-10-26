@@ -164,6 +164,23 @@ references and bean access.
 no constructors, no bean references (ADR 0004). Expressions come from configuration, not from
 events.
 
+### T10. Data exposure through telemetry
+
+*Threat.* Traces, metrics and logs travel to backends (Jaeger, Tempo, a SaaS APM, Prometheus) that
+are usually readable by more people than the Kafka topics. A span attribute holding a prompt, an
+answer or a record value would copy personal data there, around every topic ACL.
+
+*Mitigations.* Spans carry names, models, token counts, topics, partitions, offsets, outcomes and
+bounded error classes, never prompts, answers, keys or values (`ObservabilityIT` asserts that no
+span attribute contains the test card number). Log lines name the record's coordinates, not its
+content. Metric tags are bounded sets; the tenant is the one value that comes from the event, and
+it is capped by `enricher.metrics.max-tenants`. The tenant is also attached to `process` spans:
+when the tenant expression yields something sensitive (a customer id rather than a merchant), turn
+the tenant tag off (`enricher.metrics.tenant-tag=false`) and drop `enricher.tenant` with a custom
+observation filter or in the collector. The actuator exposes only `health`, `info`, `prometheus`
+and `metrics`; health details are shown by default for the demo (`ENRICHER_HEALTH_DETAILS`) and
+should be `when-authorized` or `never` where the port is reachable from outside the cluster.
+
 ## Out of scope for v0.1.0
 
 - Semantic injection detection (classifiers, canaries) and output moderation.

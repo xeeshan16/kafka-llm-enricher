@@ -7,6 +7,29 @@ All notable changes to this project are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- Observability. `ObservedLlmProvider` records each provider exchange as a
+  `gen_ai.client.operation` observation (OpenTelemetry GenAI names and tags, `CLIENT` span, custom
+  `LlmObservationConvention` supported); `ObservedRecordProcessor` records each input record as
+  `enricher.record.process` (continuing the producer's trace from the record headers) and each
+  output as `enricher.record.publish` (writing the trace context into its headers). The retry
+  layer carries the record's observation onto its attempt threads.
+- Micrometer metrics in the starter when a `MeterRegistry` is present: `MicrometerUsageMeter`
+  (token histogram, calls, tokens, cost and ledger savings per tenant with bounded tenant tags,
+  skips, deferrals, downgrades, repairs, masked values) and `EnricherMeterBinder` (engine and
+  rate-limiter counters and gauges). `enricher.metrics.tenant-tag` and `max-tenants`.
+- `enricher` health component (`PipelinesHealthIndicator`), `DOWN` when a consumer loop has died.
+- Standalone app: Actuator, Prometheus endpoint, OpenTelemetry tracing over OTLP, structured
+  logging, graceful shutdown, and the `demo` profile with `DisputeGenerator`, a reproducible
+  synthetic dispute stream.
+- `enricher.providers.fake.latency` / `latency-jitter`: deterministic simulated latency.
+- Multi-stage `Dockerfile` (layered jar, non-root), `docker-compose.yml` demo with Prometheus,
+  Grafana (provisioned dashboard) and Jaeger, a Helm chart, `jitpack.yml`, and CI jobs that build
+  the image, smoke-test the compose stack and lint the chart.
+- [docs/OBSERVABILITY.md](docs/OBSERVABILITY.md) and threat T10 (telemetry exposure).
+
+### Changed
+- Every `UsageMeter` bean now receives spend events (`UsageMeter.composite`); previously only a
+  single meter was used.
 - PII masking before the prompt (`mask-pii`, `mask-fields`): `PiiMasker` with checked detectors for
   card numbers (issuer range and Luhn), IBANs (mod 97), emails and phone numbers, whole-field
   redaction by path, stable per-record placeholders (`[PAN_1]`), and `PiiDetector` as the extension
