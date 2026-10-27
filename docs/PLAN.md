@@ -49,3 +49,8 @@ only after CI is green on `dev`.
   provider (and Ollama if reachable in CI); duplicate paid calls under chaos; ledger hit rate and
   cost saved on replay; throughput and p95 latency.
 - README with measured results, ROADMAP, a clean-clone quick-start job in CI, and the `v0.1.0` tag.
+
+Outcome: delivered as planned. Accuracy was measured with the fake (all 240 cases) and with a small
+Ollama model in CI (80 cases); duplicate paid calls under chaos stay covered by
+`ExactlyOnceChaosIT`, and the eval harness adds duplicate-call, ledger-hit, cost and latency
+numbers for a full dataset pass and its replay. See PROGRESS.md, day 7.

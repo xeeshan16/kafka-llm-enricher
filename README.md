@@ -2,7 +2,7 @@
 
 **Add LLM enrichment to a Kafka stream as configuration, not as another hand-written consumer: schema-validated answers, exactly-once output, a PostgreSQL result ledger so rebalances, retries and replays never pay twice for the same event, per-key parallelism that never stalls the poll loop, provider rate limits plus per-tenant budgets so one merchant's burst cannot spend everyone's quota, and card numbers, IBANs, emails and phone numbers masked before any prompt leaves the process.**
 
-> Status: under active development towards `v0.1.0`. Days 1 to 6 of 7 are done: the core engine, the Spring Boot starter, Kafka transactions and the result ledger, a parallel key-ordered consumer loop with retry topics, cost controls (rate limiting with adaptive concurrency, per-tenant budgets, skip rules, cost accounting), output quality and safety (PII masking, an injection guard, schema repair prompts, real OpenAI-compatible, Anthropic and Azure OpenAI providers), and observability and packaging (Prometheus metrics, OpenTelemetry traces from the input record through each model call to the output record, a Grafana dashboard, a Docker image, a `docker compose up` demo and a Helm chart), tested against real Kafka and PostgreSQL. See [docs/PLAN.md](docs/PLAN.md) and [docs/PROGRESS.md](docs/PROGRESS.md).
+> Version 0.1.0: the core engine, a Spring Boot starter and a runnable service, tested against real Kafka and PostgreSQL in CI, with an eval harness on a labelled synthetic dataset. Built for backend and platform teams running Spring Boot, Kafka, PostgreSQL, Kubernetes and Prometheus/OpenTelemetry. See [CHANGELOG.md](CHANGELOG.md) and [docs/ROADMAP.md](docs/ROADMAP.md).
 
 ## The problem
 
@@ -71,7 +71,7 @@ An input record such as (a test card number and a made-up address)
 {"disputeId":"D-1002","merchant":"Northwind Electronics","amount":349.00,"note":"I did not make this purchase, my card 4111 1111 1111 1111 was used fraudulently. Reach me at jane.doe@example.com."}
 ```
 
-reaches the model as `... my card [PAN_1] was used fraudulently. Reach me at [EMAIL_1].` and becomes this envelope on the output topic. This is real output from the integration test in CI (run [40196149410](https://github.com/xeeshan16/kafka-llm-enricher/actions/runs/40196149410), printed in the job log), produced by the built-in deterministic fake provider, not an LLM:
+reaches the model as `... my card [PAN_1] was used fraudulently. Reach me at [EMAIL_1].` and becomes this envelope on the output topic. This is real output from the integration test in CI (run [40509570222](https://github.com/xeeshan16/kafka-llm-enricher/actions/runs/40509570222), printed in the job log), produced by the built-in deterministic fake provider, not an LLM:
 
 ```json
 {
@@ -114,8 +114,12 @@ Requirements: JDK 21 and Docker.
 ```bash
 git clone https://github.com/xeeshan16/kafka-llm-enricher.git
 cd kafka-llm-enricher
-./mvnw verify          # unit tests + Kafka/PostgreSQL integration and chaos tests (Testcontainers), no API keys
+./mvnw verify          # unit tests + Kafka/PostgreSQL integration, chaos and eval tests (Testcontainers), no API keys
+docker compose up -d --build && scripts/smoke-test.sh    # the demo stack, see below
+scripts/eval.sh        # the eval harness on its own, prints the report
 ```
+
+CI runs exactly these commands from a fresh clone of each commit (job "quick start from a clean clone").
 
 The integration tests start Kafka and PostgreSQL in Docker and run the `dispute-triage` pipeline from `enricher-app/src/main/resources/application.yml`:
 
@@ -124,6 +128,7 @@ The integration tests start Kafka and PostgreSQL in Docker and run the `dispute-
 - `ConcurrencyAndRetryIT` checks per-key order while one call takes longer than `max.poll.interval.ms`, retry-topic delays, and dead-letter reasons for permanent, exhausted and poison records.
 - `DisputeTriagePipelineIT` also asserts that a card number and an email in an event never reach the provider, and that an answer missing required fields is fixed by one repair prompt.
 - `ObservabilityIT` publishes a dispute inside an upstream trace and checks that the trace continues through `process`, `chat` and `send` spans into the output record's headers, that no span holds the card number, and that the Prometheus scrape has the series the dashboard reads.
+- `DisputeEvalIT` is the eval harness: 240 labelled disputes through the pipeline and back from the ledger, see [Evaluation](#evaluation).
 - `CostControlIT` runs three tenants against a per-tenant cost cap (downgrade, then defer, never over the cap), a skip rule, free ledger replays for a tenant that is out of budget, and a provider that answers 429 above 3 concurrent calls.
 
 ### Run the demo
@@ -163,15 +168,30 @@ To try a real model, put for example `ENRICHER_PROVIDER=openai`, `ENRICHER_OPENA
 
 ### Use it in your own Spring Boot service
 
-Until the first tagged release (JitPack coordinates arrive with `v0.1.0`), install locally with `./mvnw install -DskipTests` and depend on:
+From JitPack (no credentials; [`jitpack.yml`](jitpack.yml) builds the tag on first request):
 
 ```xml
+<repositories>
+  <repository>
+    <id>jitpack.io</id>
+    <url>https://jitpack.io</url>
+  </repository>
+</repositories>
+
 <dependency>
-  <groupId>io.github.xeeshan16</groupId>
+  <groupId>com.github.xeeshan16.kafka-llm-enricher</groupId>
   <artifactId>enricher-spring-boot-starter</artifactId>
-  <version>0.1.0-SNAPSHOT</version>
+  <version>v0.1.0</version>
+</dependency>
+<!-- optional: the PostgreSQL result ledger and budget store -->
+<dependency>
+  <groupId>com.github.xeeshan16.kafka-llm-enricher</groupId>
+  <artifactId>enricher-ledger-postgres</artifactId>
+  <version>v0.1.0</version>
 </dependency>
 ```
+
+Gradle: `maven { url 'https://jitpack.io' }` and `implementation 'com.github.xeeshan16.kafka-llm-enricher:enricher-spring-boot-starter:v0.1.0'`. Or build it yourself with `./mvnw install -DskipTests` and use `io.github.xeeshan16:enricher-spring-boot-starter:0.1.0`.
 
 Then add an `enricher.pipelines.<name>` block to your configuration. Your existing `spring.kafka.*` settings are reused. To plug in your own model client, define a bean implementing `io.github.xeeshan16.enricher.llm.LlmProvider`.
 
@@ -180,7 +200,7 @@ For exactly-once output and a shared ledger, also:
 - set `spring.kafka.producer.transaction-id-prefix` to a value **unique per instance** (for example `enricher-${POD_NAME}-`) and `spring.kafka.consumer.isolation-level=read-committed`;
 - add `io.github.xeeshan16:enricher-ledger-postgres` and a `DataSource` (`spring.datasource.*`). The ledger creates its table with its own Flyway history table (`enricher_ledger_schema_history`), so it does not touch your migrations. To apply the DDL yourself, copy [`V1__result_ledger.sql`](enricher-ledger-postgres/src/main/resources/db/enricher-ledger/V1__result_ledger.sql) and set `enricher.ledger.initialize-schema=false`.
 
-With `spring-boot-starter-actuator` on your classpath you also get the metrics, the model-call and record observations (spans, with a tracing bridge) and the `enricher` health component described in [docs/OBSERVABILITY.md](docs/OBSERVABILITY.md). The repository has a `jitpack.yml`, so from the `v0.1.0` tag the starter can be used from JitPack without credentials.
+With `spring-boot-starter-actuator` on your classpath you also get the metrics, the model-call and record observations (spans, with a tracing bridge) and the `enricher` health component described in [docs/OBSERVABILITY.md](docs/OBSERVABILITY.md).
 
 ### Run it as a service: Docker and Kubernetes
 
@@ -217,7 +237,7 @@ The fake provider is the default. Switch with `enricher.provider` (in the standa
 | Anthropic | `ENRICHER_PROVIDER=anthropic`, `ENRICHER_ANTHROPIC_API_KEY=...`, `ENRICHER_DISPUTE_MODEL=<model id>` |
 | Azure OpenAI | `ENRICHER_PROVIDER=azure-openai`, `ENRICHER_AZURE_OPENAI_ENDPOINT=https://<resource>.openai.azure.com`, `ENRICHER_AZURE_OPENAI_API_KEY=...`, `ENRICHER_DISPUTE_MODEL=<deployment name>` |
 
-For OpenAI-compatible servers the schema is sent as a `json_schema` response format; set `ENRICHER_OPENAI_STRUCTURED_OUTPUT=json-object` or `none` for servers that do not support it (the schema then goes into the system prompt, as it always does for Anthropic). Whatever the server does, every answer is validated, and repaired once if needed. Add the model's prices under `enricher.pricing` to get cost accounting and cost caps. The HTTP providers are exercised against a local stub server in the unit tests; no run against a hosted model is part of CI.
+For OpenAI-compatible servers the schema is sent as a `json_schema` response format; set `ENRICHER_OPENAI_STRUCTURED_OUTPUT=json-object` or `none` for servers that do not support it (the schema then goes into the system prompt, as it always does for Anthropic). Whatever the server does, every answer is validated, and repaired once if needed. Add the model's prices under `enricher.pricing` to get cost accounting and cost caps. The HTTP providers are exercised against a local stub server in the unit tests, and the OpenAI-compatible provider against a small local model (Ollama) in the CI eval job; no hosted model is called in CI.
 
 ## Architecture
 
@@ -295,7 +315,7 @@ enricher_pii_masked_total{pipeline="dispute-triage",type="PAN",...} 1.0
 
 Prometheus metrics cover records by outcome and their latency, model-call latency by result, tokens (the GenAI token histogram), spend and ledger savings per tenant (tenant tags bounded by `enricher.metrics.max-tenants`), skips, deferrals and downgrades, repairs, masked personal data, commits, rebalances, backpressure, and the rate limiter's AIMD limit and 429s. The Grafana dashboard in [`deploy/grafana/dashboards`](deploy/grafana/dashboards) reads them, and CI checks that every metric it queries is exported. The `enricher` health component is `DOWN` when a consumer loop has died. Full catalogue, span attributes and cardinality rules: [docs/OBSERVABILITY.md](docs/OBSERVABILITY.md).
 
-## Design choices so far
+## Design trade-offs
 
 - **Own provider interface.** `LlmProvider` is a small interface in the core; Spring AI or LangChain4j can be adapters behind it. See [ADR 0001](docs/adr/0001-module-layout-and-provider-interface.md).
 - **Deterministic fake by default.** The fake reads the response schema and fills it from the event with keyword rules, so tests, CI and the demo run with no keys and no network. It is not a model; numbers measured with it describe the pipeline, not LLM quality.
@@ -393,9 +413,54 @@ Kafka headers:
 
 ## Evaluation
 
-All numbers below come from one CI run, [40097250912](https://github.com/xeeshan16/kafka-llm-enricher/actions/runs/40097250912) on GitHub Actions (commit `6bf16b6`, build job; the formatting check of that commit failed and was fixed in the next commit without code changes). Kafka 3.8.0 and PostgreSQL 16 run in Testcontainers, the provider is the deterministic fake, and the data is synthetic disputes. They measure delivery, ledger, budget and rate-limit mechanics, not model quality. The CI job summary prints the raw lines.
+### Eval harness: labelled disputes, end to end
 
-### Exactly-once chaos test
+`DisputeEvalIT` ([docs/EVALUATION.md](docs/EVALUATION.md)) publishes a labelled synthetic dataset to Kafka, runs the `dispute-triage` pipeline with transactions, the PostgreSQL ledger, masking, the guard and one repair attempt, and scores what a `read_committed` consumer receives. Then it publishes every event again with its fields reordered, as an upstream replay would. Dataset: 240 synthetic disputes from [`scripts/generate-eval-dataset.py`](scripts/generate-eval-dataset.py) (seed 20261027; 147 with implicit wording, 28 explicitly declining a refund, 138 carrying a test card number, email or phone number, 19 injection attempts). The eval adds the labelling guideline to the system prompt and uses prompt version `eval-v1`. Run it with `scripts/eval.sh`.
+
+Measured in CI run [40509570222](https://github.com/xeeshan16/kafka-llm-enricher/actions/runs/40509570222) (commit `d4e0347`, GitHub-hosted runner, 4 CPUs, Kafka 3.8.0 and PostgreSQL 16 in Testcontainers). Two providers:
+
+- **fake**: the built-in deterministic keyword responder, all 240 cases, simulated latency 100 ms + up to 400 ms. Not a model: its quality numbers are a keyword baseline, and its latency is simulated.
+- **qwen2.5:0.5b**: a 0.5B-parameter model served by Ollama 0.9.6 on the runner's CPU through the OpenAI-compatible provider (`json_schema` response format, temperature 0), first 80 cases, `max-in-flight` 4. A smoke test of the real-provider path, far smaller than any model you would deploy.
+
+| Pipeline guarantees | fake (240 cases) | qwen2.5:0.5b (80 cases) |
+|---|---|---|
+| Cases enriched / dead-lettered | 240 / 0 | 80 / 0 |
+| Prompts sent / containing a case's card number, email or phone | 240 / 0 | 80 / 0 |
+| Summaries containing personal data | 0 | 0 |
+| Duplicate paid calls / duplicate deliveries | 0 / 0 | 0 / 0 |
+| Replay: provider calls / ledger hits | 0 / 240 | 0 / 80 |
+| Replay: answers changed | 0 | 0 |
+
+| Answer quality (pass 1) | fake | qwen2.5:0.5b |
+|---|---|---|
+| Category accuracy / macro-F1 | 48.8 % / 0.480 | 27.5 % / 0.110 |
+| Category accuracy, explicit / implicit wording | 100.0 % / 16.3 % | 30.3 % / 25.5 % |
+| Urgency accuracy | 27.1 % | 27.5 % |
+| Refund flag accuracy (all / explicitly declined) | 55.8 % / 0.0 % | 43.8 % / 0.0 % |
+| All three fields correct | 8.3 % | 3.8 % |
+| Injection attempts that changed the answer | 19 of 19 | 10 of 10 |
+
+| Cost and latency | fake | qwen2.5:0.5b |
+|---|---|---|
+| Tokens, pass 1 (input / output) | 98,626 / 9,785 | 30,938 / 3,940 |
+| Illustrative cost, pass 1 / saved by the replay (0.15 / 0.60 USD per million tokens, not a quote) | $0.0207 / $0.0207 | $0.0070 / $0.0070 |
+| Provider call p50 / p95 | 293 / 484 ms (simulated) | 7,451 / 9,408 ms |
+| Pass 1: wall time, throughput | 5.17 s, 46.5 records/s | 156.8 s, 0.5 records/s |
+| Pass 1: end-to-end p50 / p95 (all cases published at once, so this includes queueing) | 2,810 / 4,772 ms | 82,034 / 151,019 ms |
+| Replay: wall time, throughput, end-to-end p50 / p95 | 0.67 s, 360.3 records/s, 206 / 308 ms | 0.38 s, 211.4 records/s, 202 / 361 ms |
+
+What this shows:
+
+- The guarantees hold with both providers: no personal data left the process in any of 320 prompts, no input was paid for twice, and every replayed event was answered from the ledger with the identical answer, in milliseconds instead of model time.
+- Pass-1 throughput is bounded by `max-in-flight` over model latency (16 / ~0.3 s for the fake), not by Kafka or PostgreSQL; the replay pass, which never calls the model, shows the engine's own overhead.
+- The keyword baseline is perfect on explicit wording and poor on implicit wording, declined refunds and injections, which is what the dataset is built to expose. The 0.5B model answered `fraud` for almost every case (see the confusion matrix in the job summary), so its numbers measure the provider path, not a usable classifier. Neither row says anything about the models you would deploy: run `scripts/eval.sh` against yours.
+- Every injection case came back with the injected category or urgency for both providers. For the fake that is by construction (it matches the injected words); the 0.5B model may simply answer `low` most of the time, so this run cannot tell how much of it was the injection. Either way it is why the threat model treats enrichments as advisory and does not present the guard as a defence on its own.
+
+### Delivery, ledger, budget and rate-limit mechanics
+
+All numbers in this section come from one CI run, [40097250912](https://github.com/xeeshan16/kafka-llm-enricher/actions/runs/40097250912) on GitHub Actions (commit `6bf16b6`, build job; the formatting check of that commit failed and was fixed in the next commit without code changes). Kafka 3.8.0 and PostgreSQL 16 run in Testcontainers, the provider is the deterministic fake, and the data is synthetic disputes. They measure delivery, ledger, budget and rate-limit mechanics, not model quality. The CI job summary prints the raw lines.
+
+#### Exactly-once chaos test
 
 `ExactlyOnceChaosIT`: two instances in one consumer group, 40 disputes over 4 partitions. Injected: the first commit of every transaction carrying one of 8 chosen disputes throws (the transaction aborts and is replayed), and one provider call hangs for 14 s (more than twice `max.poll.interval.ms`) while a third instance joins and partitions move.
 
@@ -407,7 +472,7 @@ All numbers below come from one CI run, [40097250912](https://github.com/xeeshan
 | Provider calls | 40 (exactly one per input) |
 | Ledger: completed rows / hits | 40 / 54 |
 
-### Concurrency and retry topics
+#### Concurrency and retry topics
 
 `ConcurrencyAndRetryIT`: 8 keys x 5 records on one partition, `max-in-flight` 8, one call of 5 s while `max.poll.interval.ms` is 3 s.
 
@@ -421,7 +486,7 @@ All numbers below come from one CI run, [40097250912](https://github.com/xeeshan
 
 Routing in the same test: a record failing 4 times with a retryable error recovered through both retry topics (5 calls); one failing forever was dead-lettered as `RETRIES_EXHAUSTED` after 3 stages (6 calls); a 400 went to the DLQ as `PROVIDER_ERROR` and a poison record as `PROCESSING_ERROR` after one call each.
 
-### Budgets, skip rules and free replays
+#### Budgets, skip rules and free replays
 
 `CostControlIT`, pipeline `costed`, one partition, PostgreSQL budget store. Prices: `fake-1` 10 / 40 USD and `fake-mini` 5 / 20 USD per million input / output tokens (made up for the test). Daily cap 0.012 USD (12,000 micro-USD) per tenant, `globex` uncapped, `on-exceeded: downgrade` to `fake-mini`, then `defer`. Skip rule `event.amount != null and event.amount < 5`. Input: 12 `acme` disputes, 6 `globex`, 6 `initech` (all under 5 USD), then the first 3 `acme` disputes again.
 
@@ -442,7 +507,7 @@ Routing in the same test: a record failing 4 times with a retryable error recove
 
 `PostgresBudgetStoreIT`: 16 threads, each with its own store instance, made 640 charges of 100 tokens against one tenant with a 10,000-token cap. 100 were granted, and the counter ended at exactly 10,000.
 
-### Adaptive concurrency under 429s
+#### Adaptive concurrency under 429s
 
 `CostControlIT`, pipeline `throttled`: 40 records, `max-in-flight` 16, a provider that answers 429 (with `Retry-After: 100ms`) whenever more than 3 calls run at once. Rate limiter starting at 16 concurrent calls, halving at most every 200 ms.
 
@@ -454,7 +519,7 @@ Routing in the same test: a record failing 4 times with a retryable error recove
 | Concurrency limit at the end (started at 16) | 4 |
 | Most calls the provider served at once | 3 |
 
-### Masking and repair
+#### Masking and repair
 
 `DisputeTriagePipelineIT`, CI run [40196149410](https://github.com/xeeshan16/kafka-llm-enricher/actions/runs/40196149410) (commit `b7e36c8`): 4 disputes through the demo pipeline with its defaults (masking, guard, one repair attempt). The fake provider is scripted to answer one dispute with an object missing required fields unless the prompt is a repair, and another with prose every time. These are assertions of the test, which passed:
 
@@ -465,9 +530,7 @@ Routing in the same test: a record failing 4 times with a retryable error recove
 | D-1003: prose, then prose again | dead-lettered as `INVALID_JSON` after 2 calls |
 | Provider calls for 4 disputes / for the replayed dispute | 6 / 0 |
 
-The full eval harness lands on day 7; this section will only ever show numbers from real runs, with the provider and dataset that produced them.
-
-## Limitations (current)
+## Limitations
 
 - One duplicate paid call remains possible per crash: a worker that dies after the model answered but before the answer was stored in the ledger. The next attempt pays again. The output stays exactly-once.
 - Unusable answers are not stored, so replaying a dead-lettered record calls the model again.
@@ -481,6 +544,16 @@ The full eval harness lands on day 7; this section will only ever show numbers f
 - The HTTP providers are tested against a local stub server, not against hosted models, in CI.
 - The `send` span of an output record ends when the record is handed to the engine, before its Kafka transaction commits; an aborted transaction still shows a send span. Consumer lag is not exported by the enricher; use your Kafka exporter for it.
 - No container image is published to a registry yet; build it from the Dockerfile.
+- The eval dataset is synthetic and template-based (24 note templates, English only); it measures the pipeline and gives a relative signal for prompts and models, not real-world accuracy on your disputes. The only real model in CI is a tiny CPU model.
+
+## What I'd do next
+
+- Store dead-lettered answers and add a write-ahead "answer received" marker, to remove the last duplicate-call window.
+- Shared rate limits across replicas, and a scheduled purge of ledger rows and budget windows.
+- An eval gate in CI: fail a prompt or model change that drops accuracy below a stored baseline for a chosen provider, on a larger, multilingual v2 dataset.
+- Publish the image to GHCR on tags, and add Avro/Protobuf input via Schema Registry.
+
+The full list, with good-first-issue items, is in [docs/ROADMAP.md](docs/ROADMAP.md).
 
 ## License
 

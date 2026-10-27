@@ -179,3 +179,26 @@
 - No image is pushed to a registry; publishing to GHCR on tags is on the roadmap for day 7 or later.
 
 **Next (day 7):** the eval harness on a labelled synthetic dataset (field-level extraction accuracy with the fake provider, duplicate paid calls under chaos, ledger hit rate and cost saved on replay, throughput and p95 latency), measured results in the README, ROADMAP, a clean-clone quick-start job in CI, and the `v0.1.0` tag.
+
+## Day 7 (2026-10-27): evals, polish and v0.1.0
+
+**Built**
+
+- Eval harness in `enricher-app` (`io.github.xeeshan16.enricher.eval`): `DisputeEvalIT` (one enricher instance with the standard auto-configuration on Kafka and PostgreSQL in Testcontainers, every provider call recorded by a `BeanPostProcessor`-installed `RecordingLlmProvider`; pass 1 scored on what a `read_committed` reader receives, then a replay with reordered fields), `EvalCase` (dataset loader), `EvalMetrics` (accuracy, macro-F1, confusion, nearest-rank percentiles) with `EvalMetricsTest`. Report to `target/eval/report.md` / `report.json` and stdout. Guarantees asserted for every provider; quality reported only.
+- Dataset: `scripts/generate-eval-dataset.py` (seed 20261027) writes `eval/disputes-v1.jsonl`, 240 labelled synthetic disputes with explicit and implicit wording, declined refunds, test card numbers, emails, phone numbers and 19 injection attempts. Labelling guideline in [EVALUATION.md](EVALUATION.md).
+- `scripts/eval.sh`: one command; the provider is chosen with the service's own `ENRICHER_*` variables.
+- CI: eval report in the build job summary and as an artifact; `eval-ollama` job (Ollama 0.9.6, `qwen2.5:0.5b` on the runner CPU, 80 cases, informational: `continue-on-error`); `quickstart` job (fresh `git clone`, `./mvnw verify`, `docker compose up -d --build` plus the smoke test, `scripts/eval.sh`, no CI caches).
+- Docs: [EVALUATION.md](EVALUATION.md), [ROADMAP.md](ROADMAP.md), README (version line, JitPack coordinates, measured eval tables, design trade-offs, limitations, what I'd do next), CHANGELOG for 0.1.0. Versions set to `0.1.0` for the tag.
+
+**Verified**
+
+- In CI on `dev`, run [40508708933](https://github.com/xeeshan16/kafka-llm-enricher/actions/runs/40508708933) for `e543ba4`: build (Error Prone, all tests including `DisputeEvalIT`), docker, helm and the Ollama eval passed; format and the quick-start job failed on formatting only (the quick start runs Spotless as part of `./mvnw verify`). Fixed in `d4e0347`.
+- Run [40509570222](https://github.com/xeeshan16/kafka-llm-enricher/actions/runs/40509570222) for `d4e0347`: all six jobs green, including the clean-clone quick start. The README's eval tables come from this run. Fake provider, 240 cases: 240 enriched, 0 of 240 prompts with personal data, 0 duplicate paid calls, replay 0 calls and 240 ledger hits, category accuracy 48.8 % (100 % explicit, 16.3 % implicit wording), pass 1 46.5 records/s with simulated latency, replay 360.3 records/s. `qwen2.5:0.5b`, 80 cases: the same guarantees held (0 of 80 prompts with personal data, 0 replay calls, 80 ledger hits); category accuracy 27.5 % (it answered `fraud` for nearly every case), provider call p50 7.5 s.
+- The fake's quality numbers were identical in both runs (deterministic). Nothing was compiled or run locally except the dataset generator and a check, with the core masker classes compiled against local Jackson jars, that masking removes every PII value of the dataset; formatting came from the CI formatter's diff.
+
+**Notes and plan adjustments**
+
+- The eval adds a labelling guideline to the system prompt (prompt version `eval-v1`) because urgency depends on a team policy the deployed prompt does not state.
+- The harness lives in `enricher-app`'s tests rather than its own module, so it runs the exact `application.yml` pipeline and the app's provider wiring; it is in every `./mvnw verify`.
+- Ollama runs as a plain container started by a step, not a service container, so its logs do not bury the report.
+- No image is published to a registry; GHCR publishing is on the roadmap.

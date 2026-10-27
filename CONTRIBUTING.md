@@ -16,14 +16,20 @@ Integration tests are named `*IT` and run in the `integration-test` phase with F
 console output goes to `*/target/failsafe-reports/*-output.txt`. Changes to the listener, the
 ledger or transaction handling must keep `ExactlyOnceChaosIT` green.
 
+`scripts/eval.sh` runs the eval harness (`DisputeEvalIT`) on its own and prints its report; see
+[docs/EVALUATION.md](docs/EVALUATION.md). Changes to prompts, masking or the schema should come with
+its report before and after. To grow the dataset, change `scripts/generate-eval-dataset.py` and
+regenerate the file rather than editing it by hand.
+
 ## Where things live
 
 | Module | What belongs there |
 |---|---|
 | `enricher-core` | Framework-free logic: providers, prompts, validation, hashing, the ledger contract. No Spring or Kafka imports. |
 | `enricher-ledger-postgres` | The PostgreSQL ledger and its migrations. Plain JDBC plus Flyway, no Spring. |
-| `enricher-spring-boot-starter` | Auto-configuration, properties, Kafka listener wiring. |
-| `enricher-app` | The runnable service and its example configuration. |
+| `enricher-kafka` | The consumer loop, key lanes, retry and deferred topics, routing. Plain `kafka-clients`, no Spring. |
+| `enricher-spring-boot-starter` | Auto-configuration, properties, metrics and health wiring. |
+| `enricher-app` | The runnable service, its example configuration, the demo stream and the eval harness. |
 
 ## Extension points
 
@@ -32,8 +38,13 @@ ledger or transaction handling must keep `ExactlyOnceChaosIT` green.
 - `ResultLedger`: keep leases and stored results somewhere else (Redis, DynamoDB, another SQL
   database). `claim` must grant at most one live lease per key, `complete` must keep the first
   stored result, and `release` must only drop the caller's own lease.
-- `EnrichedRecordSink`: publish enriched envelopes somewhere other than a Kafka topic. Inside a
-  Kafka transaction, only a transactional `KafkaTemplate` keeps output exactly-once.
+- `PiiDetector`: recognise another kind of personal data (a national id, an account reference);
+  add it to `PiiMasker` and a case to `PiiMaskerTest`.
+- `UsageMeter`: receive every spend, ledger-hit, skip, deferral, repair and masking event (the
+  Micrometer exporter is one implementation; every `UsageMeter` bean is called).
+- `LlmObservationConvention`: change span names and tags of model calls.
+- `OutputRecordFactory` and `KafkaClientFactory`: shape output records and headers, or wrap the
+  Kafka clients (the chaos test injects failures this way).
 - Any starter bean can be replaced by defining your own bean of the same type.
 
 ## Pull requests

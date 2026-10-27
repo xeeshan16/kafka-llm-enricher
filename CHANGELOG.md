@@ -6,7 +6,23 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-10-27
+
+First release. Tag `v0.1.0`; usable from JitPack as
+`com.github.xeeshan16.kafka-llm-enricher:enricher-spring-boot-starter:v0.1.0`.
+
 ### Added
+- Eval harness `DisputeEvalIT`: a seeded generator (`scripts/generate-eval-dataset.py`) and 240
+  labelled synthetic disputes (`eval/disputes-v1.jsonl`); the dataset goes through the real
+  pipeline on Kafka and PostgreSQL, then is replayed with reordered fields. It reports category,
+  urgency and refund-flag accuracy (with explicit/implicit and declined-refund slices), injection
+  outcomes, personal data in prompts and summaries, paid and duplicate calls, ledger hits and cost
+  saved on replay, throughput and end-to-end latency, to `target/eval/report.{md,json}`, and
+  asserts the pipeline guarantees for any provider. `scripts/eval.sh` runs it; the provider is
+  chosen with the service's `ENRICHER_*` variables. See docs/EVALUATION.md.
+- CI: the eval report in the build job summary, an informational eval job against a small local
+  model (Ollama, `qwen2.5:0.5b`), and a job that runs the README quick start from a fresh clone.
+- docs/ROADMAP.md and docs/EVALUATION.md; JitPack coordinates in the README.
 - Observability. `ObservedLlmProvider` records each provider exchange as a
   `gen_ai.client.operation` observation (OpenTelemetry GenAI names and tags, `CLIENT` span, custom
   `LlmObservationConvention` supported); `ObservedRecordProcessor` records each input record as
@@ -27,7 +43,6 @@ All notable changes to this project are documented here. The format follows
   the image, smoke-test the compose stack and lint the chart.
 - [docs/OBSERVABILITY.md](docs/OBSERVABILITY.md) and threat T10 (telemetry exposure).
 
-### Changed
 - Every `UsageMeter` bean now receives spend events (`UsageMeter.composite`); previously only a
   single meter was used.
 - PII masking before the prompt (`mask-pii`, `mask-fields`): `PiiMasker` with checked detectors for
@@ -96,7 +111,7 @@ All notable changes to this project are documented here. The format follows
 - Build and CI: Maven wrapper, Error Prone, Spotless (google-java-format 1.35.0), JaCoCo,
   Testcontainers Kafka integration test.
 
-### Changed
+### Changed during development (before the first release)
 - The default `enricher.ledger.lease-ttl` is 4 minutes (was 2), and the lease warning covers the
   first call plus every repair call.
 - The demo `dispute-triage` pipeline uses prompt version `v2`: its prompt is now masked and guarded.
@@ -113,3 +128,6 @@ All notable changes to this project are documented here. The format follows
 - The enrichment in the envelope is written in canonical (sorted) key order.
 - The standalone app now needs PostgreSQL (`ENRICHER_DB_URL`, `ENRICHER_DB_USER`,
   `ENRICHER_DB_PASSWORD`) and reads only committed records.
+
+[Unreleased]: https://github.com/xeeshan16/kafka-llm-enricher/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/xeeshan16/kafka-llm-enricher/tree/v0.1.0
