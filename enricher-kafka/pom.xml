@@ -7,7 +7,7 @@
   <parent>
     <groupId>io.github.xeeshan16</groupId>
     <artifactId>kafka-llm-enricher-parent</artifactId>
-    <version>0.1.0-SNAPSHOT</version>
+    <version>0.1.0</version>
   </parent>
 
   <artifactId>enricher-kafka</artifactId>
