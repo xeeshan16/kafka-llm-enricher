@@ -33,7 +33,8 @@ class EvalMetricsTest {
   void confusionGroupsByExpectedThenPredicted() {
     Map<String, Map<String, Long>> m =
         EvalMetrics.confusion(
-            List.of(new Pair("a", "a"), new Pair("a", "b"), new Pair("a", "b"), new Pair("b", null)));
+            List.of(
+                new Pair("a", "a"), new Pair("a", "b"), new Pair("a", "b"), new Pair("b", null)));
     assertThat(m).containsOnlyKeys("a", "b");
     assertThat(m.get("a")).containsEntry("a", 1L).containsEntry("b", 2L);
     assertThat(m.get("b")).containsEntry("-", 1L);

@@ -219,7 +219,9 @@ class DisputeEvalIT {
 
       // The product's guarantees, for every provider.
       JsonNode g = report.path("guarantees");
-      assertThat(g.path("unfinishedCases").asInt()).as("every case enriched or dead-lettered").isZero();
+      assertThat(g.path("unfinishedCases").asInt())
+          .as("every case enriched or dead-lettered")
+          .isZero();
       assertThat(g.path("duplicateDeliveries").asInt()).as("one output per input").isZero();
       assertThat(g.path("promptsWithPersonalData").asInt()).as("no PII in any prompt").isZero();
       assertThat(g.path("duplicatePaidCalls").asInt()).as("one paid call per input").isZero();
@@ -425,11 +427,14 @@ class DisputeEvalIT {
 
     // Replay.
     Set<String> enrichedFirst = new LinkedHashSet<>();
-    first.deliveries().forEach((id, d) -> {
-          if (d.enriched()) {
-            enrichedFirst.add(id);
-          }
-        });
+    first
+        .deliveries()
+        .forEach(
+            (id, d) -> {
+              if (d.enriched()) {
+                enrichedFirst.add(id);
+              }
+            });
     int replayCallsForEnriched =
         (int) replayCalls.stream().filter(c -> enrichedFirst.contains(c.disputeId())).count();
     int ledgerHits = 0;
@@ -448,7 +453,10 @@ class DisputeEvalIT {
         savedInput += usage.path("inputTokens").asLong();
         savedOutput += usage.path("outputTokens").asLong();
       }
-      if (!again.envelope().path("enrichment").equals(first.deliveries().get(id).envelope().path("enrichment"))) {
+      if (!again
+          .envelope()
+          .path("enrichment")
+          .equals(first.deliveries().get(id).envelope().path("enrichment"))) {
         changed++;
       }
     }
@@ -470,7 +478,8 @@ class DisputeEvalIT {
                 + env("ENRICHER_FAKE_LATENCY_JITTER", "400ms")
             : "n/a");
     setup.put("structuredOutput", env("ENRICHER_OPENAI_STRUCTURED_OUTPUT", "json-schema"));
-    setup.put("illustrativePricesUsdPerMillion", inputPrice + " input / " + outputPrice + " output");
+    setup.put(
+        "illustrativePricesUsdPerMillion", inputPrice + " input / " + outputPrice + " output");
     setup.put("commit", env("GITHUB_SHA", "local"));
     setup.put("run", env("GITHUB_RUN_ID", "local"));
     setup.put("javaRuntime", System.getProperty("java.version"));
@@ -524,7 +533,8 @@ class DisputeEvalIT {
 
     ObjectNode guarantees = report.putObject("guarantees");
     guarantees.put("unfinishedCases", cases.size() - first.deliveries().size());
-    guarantees.put("duplicateDeliveries", first.duplicateDeliveries() + replay.duplicateDeliveries());
+    guarantees.put(
+        "duplicateDeliveries", first.duplicateDeliveries() + replay.duplicateDeliveries());
     guarantees.put("promptsWithPersonalData", promptsWithPersonalData);
     guarantees.put("duplicatePaidCalls", duplicatePaidCalls);
     guarantees.put("replayCallsForEnrichedCases", replayCallsForEnriched);
@@ -569,33 +579,122 @@ class DisputeEvalIT {
             s.path("run").asText(),
             s.path("cpus").asInt()));
     b.append("| Quality (pass 1, as delivered) | Result |\n|---|---|\n");
-    row(b, "Enriched / dead-lettered", q.path("enriched").asInt() + " / " + q.path("deadLettered").asInt() + " " + q.path("deadLetterReasons"));
-    row(b, "Category accuracy / macro-F1", pct(q, "categoryAccuracy") + " / " + num(q, "categoryMacroF1"));
+    row(
+        b,
+        "Enriched / dead-lettered",
+        q.path("enriched").asInt()
+            + " / "
+            + q.path("deadLettered").asInt()
+            + " "
+            + q.path("deadLetterReasons"));
+    row(
+        b,
+        "Category accuracy / macro-F1",
+        pct(q, "categoryAccuracy") + " / " + num(q, "categoryMacroF1"));
     q.path("categoryAccuracyBySlice")
         .fields()
-        .forEachRemaining(e -> row(b, "Category accuracy, " + e.getKey() + " wording", pct(e.getValue())));
+        .forEachRemaining(
+            e -> row(b, "Category accuracy, " + e.getKey() + " wording", pct(e.getValue())));
     row(b, "Urgency accuracy", pct(q, "urgencyAccuracy"));
-    row(b, "Refund flag accuracy (all / negated requests)", pct(q, "refundAccuracy") + " / " + pct(q, "refundAccuracyNegated") + " of " + q.path("negatedRefundCases").asInt());
+    row(
+        b,
+        "Refund flag accuracy (all / negated requests)",
+        pct(q, "refundAccuracy")
+            + " / "
+            + pct(q, "refundAccuracyNegated")
+            + " of "
+            + q.path("negatedRefundCases").asInt());
     row(b, "All three fields correct", pct(q, "allThreeFieldsCorrect"));
-    row(b, "Injection cases that changed the answer", q.path("injectionFollowed").asInt() + " of " + q.path("injectionCases").asInt());
+    row(
+        b,
+        "Injection cases that changed the answer",
+        q.path("injectionFollowed").asInt() + " of " + q.path("injectionCases").asInt());
     row(b, "Summaries containing personal data", q.path("summariesWithPersonalData").asText());
-    row(b, "Repair calls / repaired and enriched", q.path("repairCalls").asInt() + " / " + q.path("repairedAndEnriched").asInt());
+    row(
+        b,
+        "Repair calls / repaired and enriched",
+        q.path("repairCalls").asInt() + " / " + q.path("repairedAndEnriched").asInt());
     b.append("\n| Privacy, cost, replay | Result |\n|---|---|\n");
-    row(b, "Prompts sent / with a case's personal data / with placeholders", p.path("promptsSent").asInt() + " / " + p.path("promptsWithPersonalData").asInt() + " / " + p.path("promptsWithPlaceholders").asInt() + " (" + p.path("casesWithPersonalData").asInt() + " cases carry personal data)");
-    row(b, "Provider calls, pass 1 (failed attempts)", c.path("providerCallsFirstPass").asInt() + " (" + c.path("failedCallsFirstPass").asInt() + ")");
-    row(b, "Tokens, pass 1 (input / output)", c.path("inputTokens").asLong() + " / " + c.path("outputTokens").asLong());
-    row(b, "Illustrative cost, pass 1", "$" + c.path("illustrativeCostUsd").asText() + " at " + s.path("illustrativePricesUsdPerMillion").asText() + " USD per million tokens");
-    row(b, "Replay: provider calls / ledger hits", c.path("providerCallsReplay").asInt() + " / " + c.path("ledgerHitsReplay").asInt() + " (" + pct(c, "ledgerHitShareReplay") + " of cases)");
+    row(
+        b,
+        "Prompts sent / with a case's personal data / with placeholders",
+        p.path("promptsSent").asInt()
+            + " / "
+            + p.path("promptsWithPersonalData").asInt()
+            + " / "
+            + p.path("promptsWithPlaceholders").asInt()
+            + " ("
+            + p.path("casesWithPersonalData").asInt()
+            + " cases carry personal data)");
+    row(
+        b,
+        "Provider calls, pass 1 (failed attempts)",
+        c.path("providerCallsFirstPass").asInt()
+            + " ("
+            + c.path("failedCallsFirstPass").asInt()
+            + ")");
+    row(
+        b,
+        "Tokens, pass 1 (input / output)",
+        c.path("inputTokens").asLong() + " / " + c.path("outputTokens").asLong());
+    row(
+        b,
+        "Illustrative cost, pass 1",
+        "$"
+            + c.path("illustrativeCostUsd").asText()
+            + " at "
+            + s.path("illustrativePricesUsdPerMillion").asText()
+            + " USD per million tokens");
+    row(
+        b,
+        "Replay: provider calls / ledger hits",
+        c.path("providerCallsReplay").asInt()
+            + " / "
+            + c.path("ledgerHitsReplay").asInt()
+            + " ("
+            + pct(c, "ledgerHitShareReplay")
+            + " of cases)");
     row(b, "Replay: illustrative cost saved", "$" + c.path("illustrativeCostSavedUsd").asText());
-    row(b, "Duplicate paid calls / duplicate deliveries", g.path("duplicatePaidCalls").asInt() + " / " + g.path("duplicateDeliveries").asInt());
+    row(
+        b,
+        "Duplicate paid calls / duplicate deliveries",
+        g.path("duplicatePaidCalls").asInt() + " / " + g.path("duplicateDeliveries").asInt());
     b.append("\n| Performance (Kafka in, read_committed out) | Pass 1 | Replay |\n|---|---|---|\n");
     JsonNode f = perf.path("firstPass");
     JsonNode rp = perf.path("replay");
-    b.append(String.format(Locale.ROOT, "| Records / wall time | %d / %.2f s | %d / %.2f s |%n", f.path("records").asInt(), f.path("seconds").asDouble(), rp.path("records").asInt(), rp.path("seconds").asDouble()));
-    b.append(String.format(Locale.ROOT, "| Throughput | %.1f records/s | %.1f records/s |%n", f.path("recordsPerSecond").asDouble(), rp.path("recordsPerSecond").asDouble()));
-    b.append(String.format(Locale.ROOT, "| End-to-end latency p50 / p95 / p99 | %.0f / %.0f / %.0f ms | %.0f / %.0f / %.0f ms |%n", f.path("endToEndP50Ms").asDouble(), f.path("endToEndP95Ms").asDouble(), f.path("endToEndP99Ms").asDouble(), rp.path("endToEndP50Ms").asDouble(), rp.path("endToEndP95Ms").asDouble(), rp.path("endToEndP99Ms").asDouble()));
-    b.append(String.format(Locale.ROOT, "| Provider call latency p50 / p95 | %.0f / %.0f ms | - |%n", perf.path("providerCallP50Ms").asDouble(), perf.path("providerCallP95Ms").asDouble()));
-    b.append("\nCategory confusion (expected -> predicted counts): ").append(q.path("categoryConfusion")).append('\n');
+    b.append(
+        String.format(
+            Locale.ROOT,
+            "| Records / wall time | %d / %.2f s | %d / %.2f s |%n",
+            f.path("records").asInt(),
+            f.path("seconds").asDouble(),
+            rp.path("records").asInt(),
+            rp.path("seconds").asDouble()));
+    b.append(
+        String.format(
+            Locale.ROOT,
+            "| Throughput | %.1f records/s | %.1f records/s |%n",
+            f.path("recordsPerSecond").asDouble(),
+            rp.path("recordsPerSecond").asDouble()));
+    b.append(
+        String.format(
+            Locale.ROOT,
+            "| End-to-end latency p50 / p95 / p99 | %.0f / %.0f / %.0f ms | %.0f / %.0f / %.0f ms |%n",
+            f.path("endToEndP50Ms").asDouble(),
+            f.path("endToEndP95Ms").asDouble(),
+            f.path("endToEndP99Ms").asDouble(),
+            rp.path("endToEndP50Ms").asDouble(),
+            rp.path("endToEndP95Ms").asDouble(),
+            rp.path("endToEndP99Ms").asDouble()));
+    b.append(
+        String.format(
+            Locale.ROOT,
+            "| Provider call latency p50 / p95 | %.0f / %.0f ms | - |%n",
+            perf.path("providerCallP50Ms").asDouble(),
+            perf.path("providerCallP95Ms").asDouble()));
+    b.append("\nCategory confusion (expected -> predicted counts): ")
+        .append(q.path("categoryConfusion"))
+        .append('\n');
     return b.toString();
   }
 
@@ -648,7 +747,9 @@ class DisputeEvalIT {
   private static void awaitAssignment(KafkaConsumer<String, String> reader) {
     Instant deadline = Instant.now().plus(Duration.ofSeconds(60));
     while (reader.assignment().isEmpty() && Instant.now().isBefore(deadline)) {
-      assertThat(reader.poll(Duration.ofMillis(200))).as("no output before the first pass").isEmpty();
+      assertThat(reader.poll(Duration.ofMillis(200)))
+          .as("no output before the first pass")
+          .isEmpty();
     }
     assertThat(reader.assignment()).as("the reader got its partitions").isNotEmpty();
   }

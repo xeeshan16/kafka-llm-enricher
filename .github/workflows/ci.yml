@@ -146,11 +146,6 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     continue-on-error: true
-    services:
-      ollama:
-        image: ollama/ollama:0.9.6
-        ports:
-          - 11434:11434
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-java@v4
@@ -160,8 +155,9 @@ jobs:
           cache: maven
       - name: Pin Docker API version for Testcontainers
         run: echo "api.version=1.44" > ~/.docker-java.properties
-      - name: Pull the model
+      - name: Start Ollama and pull the model
         run: |
+          docker run -d --name ollama -p 11434:11434 ollama/ollama:0.9.6
           for _ in $(seq 1 30); do curl -fsS http://localhost:11434/api/version && break; sleep 2; done
           echo
           curl -fsS http://localhost:11434/api/pull -d '{"model":"qwen2.5:0.5b","stream":false}'
@@ -195,6 +191,9 @@ jobs:
             enricher-app/target/eval/
             enricher-app/target/failsafe-reports/
           if-no-files-found: ignore
+      - name: Stop Ollama
+        if: always()
+        run: docker rm -f ollama
 
   quickstart:
     # The README quick start, run as a new user would: a fresh clone, no CI caches.
